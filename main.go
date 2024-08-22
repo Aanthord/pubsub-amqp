@@ -12,27 +12,25 @@ import (
 	"strconv"
 	"time"
 
-	"pack.ag/amqp"
+	"github.com/aanthord/pubsub-amqp/docs" // Ensure this is the correct path for your docs package
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
 	"github.com/opentracing/opentracing-go"
 	opentracinglog "github.com/opentracing/opentracing-go/log"
+	"github.com/rs/cors"
 	httpSwagger "github.com/swaggo/http-swagger"
+	"github.com/swaggo/swag"
 	"github.com/uber/jaeger-client-go"
 	"github.com/uber/jaeger-client-go/config"
-	"github.com/rs/cors"
-	"github.com/swaggo/swag"
-	
-	// Make sure to replace "username/projectname" with your actual GitHub username and project name
-	_ "github.com/username/projectname/docs"
+	"pack.ag/amqp"
 )
 
-// @ignore
+// MessagePayload defines the structure of the AMQP message payload
 type MessagePayload struct {
-	XMLName   xml.Name              `xml:"OAGIMessage"`
-	Sender    string                `xml:"Sender,attr"`
-	Timestamp string                `xml:"Timestamp,attr"`
-	Version   string                `xml:"Version,attr"`
+	XMLName   xml.Name               `xml:"OAGIMessage"`
+	Sender    string                 `xml:"Sender,attr"`
+	Timestamp string                 `xml:"Timestamp,attr"`
+	Version   string                 `xml:"Version,attr"`
 	Content   map[string]interface{} `xml:",any"`
 }
 
@@ -98,11 +96,19 @@ func NewAmqpService(ctx context.Context) (*AmqpService, error) {
 	span, ctx := opentracing.StartSpanFromContext(ctx, "NewAmqpService")
 	defer span.Finish()
 
-	client, err := amqp.Dial(os.Getenv("AMQP_URL"))
+	amqpURL := os.Getenv("AMQP_URL")
+	if amqpURL == "" {
+		err := fmt.Errorf("AMQP_URL environment variable not set")
+		span.LogFields(opentracinglog.Error(err))
+		return nil, err
+	}
+
+	client, err := amqp.Dial(amqpURL)
 	if err != nil {
 		span.LogFields(opentracinglog.Error(err))
-		return nil, fmt.Errorf("failed to connect to AMQP: %w", err)
+		return nil, fmt.Errorf("failed to connect to AMQP at %s: %w", amqpURL, err)
 	}
+
 	return &AmqpService{client: client}, nil
 }
 
@@ -119,9 +125,9 @@ func (s *AmqpService) PublishMessage(ctx context.Context, topic string, messageP
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	maxRetries, _ := strconv.Atoi(os.Getenv("MAX_RETRIES"))
-	initialBackoffMs, _ := strconv.Atoi(os.Getenv("INITIAL_BACKOFF_MS"))
-	maxBackoffMs, _ := strconv.Atoi(os.Getenv("MAX_BACKOFF_MS"))
+	maxRetries := getEnvInt("MAX_RETRIES", 3)
+	initialBackoffMs := getEnvInt("INITIAL_BACKOFF_MS", 100)
+	maxBackoffMs := getEnvInt("MAX_BACKOFF_MS", 1000)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		session, err := s.client.NewSession()
@@ -169,9 +175,9 @@ func (s *AmqpService) ReceiveMessage(ctx context.Context, topic string) (*Messag
 
 	span.SetTag("topic", topic)
 
-	maxRetries, _ := strconv.Atoi(os.Getenv("MAX_RETRIES"))
-	initialBackoffMs, _ := strconv.Atoi(os.Getenv("INITIAL_BACKOFF_MS"))
-	maxBackoffMs, _ := strconv.Atoi(os.Getenv("MAX_BACKOFF_MS"))
+	maxRetries := getEnvInt("MAX_RETRIES", 3)
+	initialBackoffMs := getEnvInt("INITIAL_BACKOFF_MS", 100)
+	maxBackoffMs := getEnvInt("MAX_BACKOFF_MS", 1000)
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		session, err := s.client.NewSession()
@@ -253,20 +259,22 @@ func InitJaeger(serviceName string) (opentracing.Tracer, func(), error) {
 // @Failure 500 {string} string "Failed to publish message"
 // @Router /api/v1/publish [post]
 func PublishHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("Received request to publish message")
 	span, ctx := opentracing.StartSpanFromContext(r.Context(), "PublishHandler")
 	defer span.Finish()
 
 	topic := r.URL.Query().Get("topic")
 	span.SetTag("topic", topic)
+	log.Printf("Publishing to topic: %s", topic)
 
 	var messagePayload MessagePayload
 	if err := xml.NewDecoder(r.Body).Decode(&messagePayload); err != nil {
 		span.LogFields(opentracinglog.Error(err))
+		log.Printf("Error decoding XML: %v", err)
 		http.Error(w, "Invalid XML", http.StatusBadRequest)
 		return
 	}
 
-	// Set timestamp if not provided
 	if messagePayload.Timestamp == "" {
 		messagePayload.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
@@ -274,17 +282,20 @@ func PublishHandler(w http.ResponseWriter, r *http.Request) {
 	amqpService, err := NewAmqpService(ctx)
 	if err != nil {
 		span.LogFields(opentracinglog.Error(err))
+		log.Printf("Error creating AMQP service: %v", err)
 		http.Error(w, "Failed to create AMQP service", http.StatusInternalServerError)
 		return
 	}
 
 	if err := amqpService.PublishMessage(ctx, topic, messagePayload); err != nil {
 		span.LogFields(opentracinglog.Error(err))
+		log.Printf("Error publishing message: %v", err)
 		http.Error(w, "Failed to publish message", http.StatusInternalServerError)
 		return
 	}
 
 	span.LogFields(opentracinglog.String("message", fmt.Sprintf("%+v", messagePayload)))
+	log.Println("Message published successfully")
 
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintln(w, "Message published")
@@ -301,15 +312,18 @@ func PublishHandler(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {string} string "Failed to receive message"
 // @Router /api/v1/subscribe [get]
 func SubscribeHandler(w http.ResponseWriter, r *http.Request) {
+	log.Println("Received request to subscribe to a topic")
 	span, ctx := opentracing.StartSpanFromContext(r.Context(), "SubscribeHandler")
 	defer span.Finish()
 
 	topic := r.URL.Query().Get("topic")
 	span.SetTag("topic", topic)
+	log.Printf("Subscribing to topic: %s", topic)
 
 	amqpService, err := NewAmqpService(ctx)
 	if err != nil {
 		span.LogFields(opentracinglog.Error(err))
+		log.Printf("Error creating AMQP service: %v", err)
 		http.Error(w, "Failed to create AMQP service", http.StatusInternalServerError)
 		return
 	}
@@ -317,14 +331,26 @@ func SubscribeHandler(w http.ResponseWriter, r *http.Request) {
 	message, err := amqpService.ReceiveMessage(ctx, topic)
 	if err != nil {
 		span.LogFields(opentracinglog.Error(err))
+		log.Printf("Error receiving message: %v", err)
 		http.Error(w, "Failed to receive message", http.StatusInternalServerError)
 		return
 	}
 
 	span.LogFields(opentracinglog.String("message", fmt.Sprintf("%+v", message)))
+	log.Println("Message received successfully")
 
 	w.Header().Set("Content-Type", "application/xml")
 	xml.NewEncoder(w).Encode(message)
+}
+
+// getEnvInt reads an integer from the environment or returns a default value if the variable is not set or invalid
+func getEnvInt(key string, defaultValue int) int {
+	if valueStr, exists := os.LookupEnv(key); exists {
+		if value, err := strconv.Atoi(valueStr); err == nil {
+			return value
+		}
+	}
+	return defaultValue
 }
 
 func main() {
@@ -341,13 +367,32 @@ func main() {
 	opentracing.SetGlobalTracer(tracer)
 
 	// Set up Swagger
-	swaggerInfo := swag.SwaggerInfo
+	swaggerInfo := docs.SwaggerInfo
 	swaggerInfo.Title = "AMQP Pub/Sub API"
 	swaggerInfo.Description = "API for publishing and subscribing to AMQP topics"
 	swaggerInfo.Version = "1.0"
-	swaggerInfo.Host = "localhost:8080"
+	swaggerInfo.Host = ""
 	swaggerInfo.BasePath = "/api/v1"
 	swaggerInfo.Schemes = []string{"http", "https"}
+
+	// Get the base URLs from the environment
+	baseURLs := []string{
+		os.Getenv("BASE_URL_1"),
+		os.Getenv("BASE_URL_2"),
+		os.Getenv("BASE_URL_3"),
+	}
+
+	// Add these URLs as server options in Swagger
+	var servers []swag.Server
+	for _, url := range baseURLs {
+		if url != "" {
+			servers = append(servers, swag.Server{
+				URL:         url,
+				Description: "Available API server",
+			})
+		}
+	}
+	swaggerInfo.Servers = servers
 
 	router := mux.NewRouter()
 
@@ -359,15 +404,19 @@ func main() {
 	// Swagger UI
 	router.PathPrefix("/swagger/").Handler(httpSwagger.WrapHandler)
 
-	// Enable CORS
-	c := cors.New(cors.Options{
-		AllowedOrigins: []string{"*"},
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+	// Initialize CORS middleware with your desired settings
+	corsHandler := cors.New(cors.Options{
+		AllowedOrigins:   []string{"http://localhost", "http://your-server-dns-name.com"}, // Include your server's DNS name
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		ExposedHeaders:   []string{"Content-Length"},
+		AllowCredentials: true,
 	})
 
-	// Use the CORS middleware
-	handler := c.Handler(router)
+	// Wrap your router with the CORS middleware
+	handler := corsHandler.Handler(router)
 
+	// Start the server
 	log.Println("Server starting on :8080")
 	log.Fatal(http.ListenAndServe(":8080", handler))
 }
