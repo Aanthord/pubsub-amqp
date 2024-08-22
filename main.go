@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"log"
@@ -12,26 +14,31 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/aanthord/pubsub-amqp/docs" // Ensure this is the correct path for your docs package
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
 	"github.com/opentracing/opentracing-go"
 	opentracinglog "github.com/opentracing/opentracing-go/log"
 	"github.com/rs/cors"
 	httpSwagger "github.com/swaggo/http-swagger"
-	"github.com/swaggo/swag"
 	"github.com/uber/jaeger-client-go"
-	"github.com/uber/jaeger-client-go/config"
+	jaegerconfig "github.com/uber/jaeger-client-go/config"
+	"github.com/uber/jaeger-lib/metrics"
 	"pack.ag/amqp"
+
+	// Import generated docs
+	"github.com/aanthord/pubsub-ampq/docs"
 )
 
 // MessagePayload defines the structure of the AMQP message payload
 type MessagePayload struct {
-	XMLName   xml.Name               `xml:"OAGIMessage"`
-	Sender    string                 `xml:"Sender,attr"`
-	Timestamp string                 `xml:"Timestamp,attr"`
-	Version   string                 `xml:"Version,attr"`
-	Content   map[string]interface{} `xml:",any"`
+	XMLName   xml.Name               `xml:"OAGIMessage" json:"-"`
+	Sender    string                 `xml:"Sender,attr" json:"sender"`
+	Timestamp string                 `xml:"Timestamp,attr" json:"timestamp"`
+	Version   string                 `xml:"Version,attr" json:"version"`
+	Content   map[string]interface{} `xml:",any" json:"content"`
+	S3URI     string                 `xml:"S3URI,omitempty" json:"s3_uri,omitempty"`
 }
 
 // MarshalXML implements custom XML marshaling for MessagePayload
@@ -89,9 +96,10 @@ func (m *MessagePayload) UnmarshalXML(d *xml.Decoder, start xml.StartElement) er
 // AmqpService handles AMQP operations
 type AmqpService struct {
 	client *amqp.Client
+	s3svc  *s3.Client
 }
 
-// NewAmqpService creates a new AMQP service
+// NewAmqpService creates a new AMQP service with S3 integration
 func NewAmqpService(ctx context.Context) (*AmqpService, error) {
 	span, ctx := opentracing.StartSpanFromContext(ctx, "NewAmqpService")
 	defer span.Finish()
@@ -109,7 +117,39 @@ func NewAmqpService(ctx context.Context) (*AmqpService, error) {
 		return nil, fmt.Errorf("failed to connect to AMQP at %s: %w", amqpURL, err)
 	}
 
-	return &AmqpService{client: client}, nil
+	// Load the default configuration from the environment and shared config
+	cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(os.Getenv("AWS_REGION")))
+	if err != nil {
+		span.LogFields(opentracinglog.Error(err))
+		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+	}
+
+	s3svc := s3.NewFromConfig(cfg)
+
+	return &AmqpService{client: client, s3svc: s3svc}, nil
+}
+
+// SaveToS3 saves large content to S3 and returns the S3 URI
+func (s *AmqpService) SaveToS3(ctx context.Context, content []byte) (string, error) {
+	span, ctx := opentracing.StartSpanFromContext(ctx, "SaveToS3")
+	defer span.Finish()
+
+	bucket := os.Getenv("S3_BUCKET_NAME")
+	key := fmt.Sprintf("messages/%s.xml", time.Now().Format("20060102150405"))
+
+	_, err := s.s3svc.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+		Body:   bytes.NewReader(content),
+	})
+	if err != nil {
+		span.LogFields(opentracinglog.Error(err))
+		return "", fmt.Errorf("failed to upload to S3: %w", err)
+	}
+
+	s3URI := fmt.Sprintf("s3://%s/%s", bucket, key)
+	span.LogFields(opentracinglog.String("s3_uri", s3URI))
+	return s3URI, nil
 }
 
 // PublishMessage publishes a message to a topic with retry and exponential backoff
@@ -123,6 +163,22 @@ func (s *AmqpService) PublishMessage(ctx context.Context, topic string, messageP
 	if err != nil {
 		span.LogFields(opentracinglog.Error(err))
 		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+
+	// Check if the message is too large (over 4MB)
+	if len(data) > 4*1024*1024 {
+		s3URI, err := s.SaveToS3(ctx, data)
+		if err != nil {
+			span.LogFields(opentracinglog.Error(err))
+			return fmt.Errorf("failed to save large message to S3: %w", err)
+		}
+		messagePayload.S3URI = s3URI
+		messagePayload.Content = nil // Clear the content as it's now in S3
+		data, err = xml.MarshalIndent(messagePayload, "", "  ")
+		if err != nil {
+			span.LogFields(opentracinglog.Error(err))
+			return fmt.Errorf("failed to marshal message with S3 URI: %w", err)
+		}
 	}
 
 	maxRetries := getEnvInt("MAX_RETRIES", 3)
@@ -224,19 +280,22 @@ func (s *AmqpService) ReceiveMessage(ctx context.Context, topic string) (*Messag
 
 // InitJaeger initializes a Jaeger tracer
 func InitJaeger(serviceName string) (opentracing.Tracer, func(), error) {
-	cfg := &config.Configuration{
+	cfg := &jaegerconfig.Configuration{
 		ServiceName: serviceName,
-		Sampler: &config.SamplerConfig{
+		Sampler: &jaegerconfig.SamplerConfig{
 			Type:  jaeger.SamplerTypeConst,
 			Param: 1,
 		},
-		Reporter: &config.ReporterConfig{
+		Reporter: &jaegerconfig.ReporterConfig{
 			LogSpans:           true,
 			LocalAgentHostPort: os.Getenv("JAEGER_AGENT_HOST") + ":" + os.Getenv("JAEGER_AGENT_PORT"),
 		},
 	}
 
-	tracer, closer, err := cfg.NewTracer(config.Logger(jaeger.StdLogger))
+	tracer, closer, err := cfg.NewTracer(
+		jaegerconfig.Logger(jaeger.StdLogger),
+		jaegerconfig.Metrics(metrics.NullFactory),
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("could not initialize Jaeger Tracer: %w", err)
 	}
@@ -250,12 +309,12 @@ func InitJaeger(serviceName string) (opentracing.Tracer, func(), error) {
 // @Summary Publish a message to a topic
 // @Description Publish a message to a specified topic
 // @Tags messaging
-// @Accept  xml
+// @Accept  json,xml
 // @Produce  plain
 // @Param topic query string true "Topic"
 // @Param message body MessagePayload true "Message Payload"
 // @Success 200 {string} string "Message published"
-// @Failure 400 {string} string "Invalid XML"
+// @Failure 400 {string} string "Invalid payload"
 // @Failure 500 {string} string "Failed to publish message"
 // @Router /api/v1/publish [post]
 func PublishHandler(w http.ResponseWriter, r *http.Request) {
@@ -268,10 +327,27 @@ func PublishHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Publishing to topic: %s", topic)
 
 	var messagePayload MessagePayload
-	if err := xml.NewDecoder(r.Body).Decode(&messagePayload); err != nil {
-		span.LogFields(opentracinglog.Error(err))
-		log.Printf("Error decoding XML: %v", err)
-		http.Error(w, "Invalid XML", http.StatusBadRequest)
+	contentType := r.Header.Get("Content-Type")
+
+	switch contentType {
+	case "application/json":
+		if err := json.NewDecoder(r.Body).Decode(&messagePayload); err != nil {
+			span.LogFields(opentracinglog.Error(err))
+			log.Printf("Error decoding JSON: %v", err)
+			http.Error(w, "Invalid JSON", http.StatusBadRequest)
+			return
+		}
+	case "application/xml":
+		if err := xml.NewDecoder(r.Body).Decode(&messagePayload); err != nil {
+			span.LogFields(opentracinglog.Error(err))
+			log.Printf("Error decoding XML: %v", err)
+			http.Error(w, "Invalid XML", http.StatusBadRequest)
+			return
+		}
+	default:
+		span.LogFields(opentracinglog.String("error", "Unsupported Content-Type"))
+		log.Printf("Unsupported Content-Type: %s", contentType)
+		http.Error(w, "Unsupported Content-Type", http.StatusBadRequest)
 		return
 	}
 
@@ -312,18 +388,15 @@ func PublishHandler(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {string} string "Failed to receive message"
 // @Router /api/v1/subscribe [get]
 func SubscribeHandler(w http.ResponseWriter, r *http.Request) {
-	log.Println("Received request to subscribe to a topic")
 	span, ctx := opentracing.StartSpanFromContext(r.Context(), "SubscribeHandler")
 	defer span.Finish()
 
 	topic := r.URL.Query().Get("topic")
 	span.SetTag("topic", topic)
-	log.Printf("Subscribing to topic: %s", topic)
 
 	amqpService, err := NewAmqpService(ctx)
 	if err != nil {
 		span.LogFields(opentracinglog.Error(err))
-		log.Printf("Error creating AMQP service: %v", err)
 		http.Error(w, "Failed to create AMQP service", http.StatusInternalServerError)
 		return
 	}
@@ -331,26 +404,14 @@ func SubscribeHandler(w http.ResponseWriter, r *http.Request) {
 	message, err := amqpService.ReceiveMessage(ctx, topic)
 	if err != nil {
 		span.LogFields(opentracinglog.Error(err))
-		log.Printf("Error receiving message: %v", err)
 		http.Error(w, "Failed to receive message", http.StatusInternalServerError)
 		return
 	}
 
 	span.LogFields(opentracinglog.String("message", fmt.Sprintf("%+v", message)))
-	log.Println("Message received successfully")
 
 	w.Header().Set("Content-Type", "application/xml")
 	xml.NewEncoder(w).Encode(message)
-}
-
-// getEnvInt reads an integer from the environment or returns a default value if the variable is not set or invalid
-func getEnvInt(key string, defaultValue int) int {
-	if valueStr, exists := os.LookupEnv(key); exists {
-		if value, err := strconv.Atoi(valueStr); err == nil {
-			return value
-		}
-	}
-	return defaultValue
 }
 
 func main() {
@@ -371,28 +432,9 @@ func main() {
 	swaggerInfo.Title = "AMQP Pub/Sub API"
 	swaggerInfo.Description = "API for publishing and subscribing to AMQP topics"
 	swaggerInfo.Version = "1.0"
-	swaggerInfo.Host = ""
+	swaggerInfo.Host = "txanunxlbapd512:8080"
 	swaggerInfo.BasePath = "/api/v1"
 	swaggerInfo.Schemes = []string{"http", "https"}
-
-	// Get the base URLs from the environment
-	baseURLs := []string{
-		os.Getenv("BASE_URL_1"),
-		os.Getenv("BASE_URL_2"),
-		os.Getenv("BASE_URL_3"),
-	}
-
-	// Add these URLs as server options in Swagger
-	var servers []swag.Server
-	for _, url := range baseURLs {
-		if url != "" {
-			servers = append(servers, swag.Server{
-				URL:         url,
-				Description: "Available API server",
-			})
-		}
-	}
-	swaggerInfo.Servers = servers
 
 	router := mux.NewRouter()
 
@@ -406,9 +448,28 @@ func main() {
 
 	// Initialize CORS middleware with your desired settings
 	corsHandler := cors.New(cors.Options{
-		AllowedOrigins:   []string{"http://localhost", "http://your-server-dns-name.com"}, // Include your server's DNS name
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "Authorization"},
+		AllowedOrigins: []string{"http://txanunxlbapd512", "http://txanunxlbapd512.goldlnk.rootlnka.net"}, // Include your server's DNS name
+		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders: []string{
+			"Content-Type",
+			"Authorization",
+			"Accept",
+			"X-Requested-With",
+			"application/json",
+			"application/xml",
+			"text/xml",
+			"multipart/form-data",
+			"application/x-www-form-urlencoded",
+			"text/plain",
+			"text/html",
+			"application/javascript",
+			"text/css",
+			"image/png",
+			"image/jpeg",
+			"image/gif",
+			"image/webp",
+			"application/octet-stream",
+		},
 		ExposedHeaders:   []string{"Content-Length"},
 		AllowCredentials: true,
 	})
@@ -419,4 +480,14 @@ func main() {
 	// Start the server
 	log.Println("Server starting on :8080")
 	log.Fatal(http.ListenAndServe(":8080", handler))
+}
+
+// getEnvInt reads an integer from the environment or returns a default value if the variable is not set or invalid
+func getEnvInt(key string, defaultValue int) int {
+	if valueStr, exists := os.LookupEnv(key); exists {
+		if value, err := strconv.Atoi(valueStr); err == nil {
+			return value
+		}
+	}
+	return defaultValue
 }
