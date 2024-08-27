@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project implements a robust Publish-Subscribe (PubSub) service using AMQP (Advanced Message Queuing Protocol). It's designed to handle high-throughput message processing with features like distributed tracing, metrics collection, and data persistence across various storage systems.
+This project implements a robust Publish-Subscribe (PubSub) service using AMQP (Advanced Message Queuing Protocol). It's designed to handle high-throughput message processing with features like distributed tracing, metrics collection, and data persistence across various storage systems, with a focus on data integrity and traceability.
 
 ## Table of Contents
 
@@ -11,15 +11,17 @@ This project implements a robust Publish-Subscribe (PubSub) service using AMQP (
 3. [Prerequisites](#prerequisites)
 4. [Installation](#installation)
 5. [Configuration](#configuration)
-6. [Usage](#usage)
-7. [API Documentation](#api-documentation)
-8. [Development](#development)
-9. [Testing](#testing)
-10. [Deployment](#deployment)
-11. [Monitoring and Logging](#monitoring-and-logging)
-12. [Troubleshooting](#troubleshooting)
-13. [Contributing](#contributing)
-14. [License](#license)
+6. [Advanced Tracing Configuration](#advanced-tracing-configuration)
+7. [AWS S3 Append-Only Configuration](#aws-s3-append-only-configuration)
+8. [Usage](#usage)
+9. [API Documentation](#api-documentation)
+10. [Development](#development)
+11. [Testing](#testing)
+12. [Deployment](#deployment)
+13. [Monitoring and Logging](#monitoring-and-logging)
+14. [Troubleshooting](#troubleshooting)
+15. [Contributing](#contributing)
+16. [License](#license)
 
 ## Features
 
@@ -47,7 +49,7 @@ This project implements a robust Publish-Subscribe (PubSub) service using AMQP (
    - Integrated with Prometheus for detailed metrics gathering and monitoring.
 
 8. **Multi-tiered Data Persistence**:
-   - Amazon S3: For large message payloads and file storage.
+   - Amazon S3: For large message payloads and file storage, with append-only and versioning capabilities.
    - Amazon Redshift: For analytics and historical data analysis.
    - Neo4j: For graph-based data relationships and Merkle tree structure imports.
    - Local File Storage: Utilizes 256 sharded flat files for efficient data storage and retrieval.
@@ -91,8 +93,6 @@ This project implements a robust Publish-Subscribe (PubSub) service using AMQP (
 18. **Flexible Configuration**: 
     - Extensive use of environment variables for easy configuration in different environments.
 
-These features combine to create a robust, scalable, and highly traceable publish-subscribe system, capable of handling complex data flows while maintaining comprehensive logging, auditing, and analysis capabilities.
-
 ## Architecture
 
 The service is built using a modular architecture with the following key components:
@@ -111,11 +111,12 @@ The service is built using a modular architecture with the following key compone
 
 The application uses the following external services:
 - AMQP server (e.g., RabbitMQ) for message queuing
-- Amazon S3 for large message storage
+- Amazon S3 for large message storage with append-only and versioning capabilities
 - Amazon Redshift for data warehousing
 - Neo4j for graph database storage
 - Jaeger for distributed tracing
 - Prometheus for metrics collection
+- Kafka for backing Jaeger spans (optional)
 
 ## Prerequisites
 
@@ -126,6 +127,8 @@ The application uses the following external services:
 - Neo4j database
 - Jaeger server for distributed tracing
 - Prometheus server for metrics collection
+- Kafka cluster (optional, for advanced tracing setup)
+- `chattr` utility (for local append-only storage)
 
 ## Installation
 
@@ -175,6 +178,164 @@ The application uses the following external services:
    - `CORS_ALLOW_CREDENTIALS`: Whether to allow credentials for CORS requests
    - `CORS_MAX_AGE`: Max age for CORS preflight requests
 
+For advanced tracing configuration, including setting up Jaeger with Kafka as a backing store and using persistent storage with enhanced data integrity measures, see the [Advanced Tracing Configuration](#advanced-tracing-configuration) section.
+
+## Advanced Tracing Configuration
+
+### Setting up Jaeger with Kafka and Persistent Storage
+
+For enhanced tracing capabilities and data persistence, you can set up Jaeger with Kafka as a backing store and use persistent storage with additional data integrity measures.
+
+1. **Prerequisites**:
+   - Kafka cluster
+   - Persistent storage volume (e.g., EBS volume on AWS)
+   - `chattr` utility (usually part of the `e2fsprogs` package)
+
+2. **Kafka Setup**:
+   - Ensure your Kafka cluster is running and accessible.
+   - Create a topic for Jaeger spans:
+     ```
+     kafka-topics.sh --create --topic jaeger-spans --bootstrap-server localhost:9092 --partitions 5 --replication-factor 3
+     ```
+
+3. **Persistent Storage**:
+   - Mount your persistent volume to a directory, e.g., `/data/jaeger`
+   - Apply the append-only attribute to the data directory:
+     ```
+     sudo chattr +a /data/jaeger
+     ```
+   - This prevents accidental deletion and ensures data is only appended, not modified or removed.
+
+4. **Jaeger Configuration**:
+   - Update your Jaeger configuration to use Kafka and the persistent storage:
+
+     ```yaml
+     storage:
+       type: kafka
+       options:
+         kafka:
+           brokers: [kafka-broker1:9092, kafka-broker2:9092, kafka-broker3:9092]
+           topic: jaeger-spans
+           encoding: protobuf
+     spanstore:
+       type: badger
+       options:
+         directory: /data/jaeger
+         value-directory: /data/jaeger
+     ```
+
+5. **Environment Variables**:
+   Add the following to your `.env` file:
+   ```
+   JAEGER_STORAGE_TYPE=kafka
+   JAEGER_KAFKA_BROKERS=kafka-broker1:9092,kafka-broker2:9092,kafka-broker3:9092
+   JAEGER_KAFKA_TOPIC=jaeger-spans
+   JAEGER_BADGER_DIRECTORY=/data/jaeger
+   JAEGER_BADGER_VALUE_DIRECTORY=/data/jaeger
+   ```
+
+6. **Docker Compose Update**:
+   If you're using Docker Compose, update your `docker-compose.yml` to include Jaeger with Kafka storage:
+
+   ```yaml
+   jaeger:
+     image: jaegertracing/all-in-one:latest
+     ports:
+       - "16686:16686"
+       - "14268:14268"
+     environment:
+       - SPAN_STORAGE_TYPE=kafka
+       - KAFKA_BROKERS=kafka-broker1:9092,kafka-broker2:9092,kafka-broker3:9092
+       - KAFKA_TOPIC=jaeger-spans
+       - BADGER_DIRECTORY=/data/jaeger
+       - BADGER_VALUE_DIRECTORY=/data/jaeger
+     volumes:
+       - /data/jaeger:/data/jaeger
+     command: ["--badger.directory-value=/data/jaeger"]
+
+   kafka:
+     image: confluentinc/cp-kafka:latest
+     # ... (Kafka configuration)
+
+   zookeeper:
+     image: confluentinc/cp-zookeeper:latest
+     # ... (ZooKeeper configuration)
+   ```
+
+7. **Security Considerations**:
+   - Ensure proper access controls on the `/data/jaeger` directory.
+   - Use encryption at rest for the persistent volume.
+   - Configure Kafka security (SSL/SASL) as per your security requirements.
+
+8. **Monitoring and Maintenance**:
+   - Regularly monitor the size of your persistent storage and Kafka topic.
+   - Implement a retention policy for your Kafka topic to manage data growth.
+   - Periodically check the integrity of the append-only attribute:
+     ```
+     lsattr /data/jaeger
+     ```
+
+## AWS S3 Append-Only Configuration
+
+To ensure data integrity and maintain a complete history of all operations, we configure the S3 bucket used for storage to be append-only with versioning enabled. This prevents data deletion and modifications to existing objects.
+
+### S3 Bucket Policy
+
+Apply the following bucket policy to your S3 bucket:
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AppendOnlyAccess",
+            "Effect": "Allow",
+            "Principal": {
+                "AWS": "arn:aws:iam::YOUR_ACCOUNT_ID:user/YOUR_IAM_USER"
+            },
+            "Action": [
+                "s3:PutObject",
+                "s3:GetBucketLocation",
+                "s3:ListBucket",
+                "s3:GetObject",
+                "s3:GetObjectVersion"
+            ],
+            "Resource": [
+                "arn:aws:s3:::YOUR_BUCKET_NAME",
+                "arn:aws:s3:::YOUR_BUCKET_NAME/*"
+            ]
+        },
+        {
+            "Sid": "DenyObjectDeletion",
+            "Effect": "Deny",
+            "Principal": "*",
+            "Action": [
+                "s3:DeleteObject",
+                "s3:DeleteObjectVersion"
+            ],
+            "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME/*"
+        }
+    ]
+}
+```
+
+### Instructions
+
+1. Create an S3 bucket in your AWS account.
+2. Enable versioning for the bucket:
+   - Go to the S3 console, select your bucket, and navigate to the "Properties" tab.
+   - Under "Bucket Versioning", click "Edit" and enable versioning.
+3. Apply the bucket policy:
+   - In the S3 console, select your bucket and go to the "Permissions" tab.
+   - Under "Bucket policy", click "Edit" and paste the policy above.
+   - Replace `YOUR_ACCOUNT_ID`, `YOUR_IAM_USER`, and `YOUR_BUCKET_NAME` with your actual values.
+4. Update your application's AWS credentials to use an IAM user that has the permissions specified in the bucket policy.
+
+This configuration ensures that:
+- Only authorized users can write new objects and read existing ones.
+- No one can delete objects or their versions.
+- All modifications result in new versions, preserving the entire history.
+
 ## Usage
 
 1. Start the application:
@@ -188,70 +349,4 @@ The application uses the following external services:
 
 ## API Documentation
 
-Swagger documentation is available at `/swagger/index.html` when the server is running.
-
-Key endpoints:
-- `POST /api/v1/publish/{topic}`: Publish a message to a topic
-- `GET /api/v1/subscribe/{topic}`: Subscribe to messages from a topic
-- `GET /api/v1/uuid`: Generate a new UUID
-- `GET /api/v1/search`: Search for messages
-
-## Development
-
-1. Install Swag for Swagger documentation generation:
-   ```
-   go install github.com/swaggo/swag/cmd/swag@latest
-   ```
-
-2. Generate Swagger documentation:
-   ```
-   swag init -g cmd/app/main.go -o docs
-   ```
-
-3. Run the application in development mode:
-   ```
-   go run cmd/app/main.go
-   ```
-
-## Testing
-
-Run the tests with:
-```
-go test ./...
-```
-
-## Deployment
-
-1. Build the Docker image:
-   ```
-   docker build -t pubsub-amqp .
-   ```
-
-2. Run the container:
-   ```
-   docker run -p 8080:8080 --env-file .env pubsub-amqp
-   ```
-
-## Monitoring and Logging
-
-- Prometheus metrics are exposed on the `/metrics` endpoint
-- Jaeger UI can be used to view distributed traces
-- Application logs are output to stdout/stderr
-
-## Troubleshooting
-
-- Check the application logs for error messages
-- Ensure all required environment variables are set correctly
-- Verify connectivity to external services (AMQP, S3, Redshift, Neo4j)
-
-## Contributing
-
-1. Fork the repository
-2. Create a new branch for your feature
-3. Commit your changes
-4. Push to your fork
-5. Create a pull request
-
-## License
-
-[MIT License](LICENSE)
+Swagger documentation is available at `/swagger/index.html`
