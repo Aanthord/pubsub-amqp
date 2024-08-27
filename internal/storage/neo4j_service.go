@@ -48,7 +48,8 @@ func (s *neo4jService) ExecuteQuery(ctx context.Context, query string, params ma
 	session := s.driver.NewSession(neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close()
 
-	result, err := session.RunWithContext(ctx, query, params)
+	// Corrected method
+	result, err := session.Run(query, params)
 	if err != nil {
 		s.logger.Errorw("Failed to execute Neo4j query", "error", err)
 		return nil, fmt.Errorf("failed to execute Neo4j query: %w", err)
