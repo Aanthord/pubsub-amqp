@@ -1,3 +1,4 @@
+// config/config.go
 package config
 
 import (
@@ -9,21 +10,22 @@ import (
     "github.com/aanthord/pubsub-amqp/internal/amqp"
     "github.com/aanthord/pubsub-amqp/internal/storage"
     "github.com/aanthord/pubsub-amqp/internal/tracing"
+    "github.com/aanthord/pubsub-amqp/internal/types"
     "github.com/opentracing/opentracing-go"
     "go.uber.org/zap"
 )
 
-type Config struct {
-    AMQPService     amqp.AMQPService
-    S3Service       storage.S3Service
-    RedshiftService storage.RedshiftService
-    Neo4jService    storage.Neo4jService
-    UUIDService     storage.UUIDService
-    SearchService   storage.SearchService
-    Tracer          opentracing.Tracer
-    TracerCloser    io.Closer
-    Logger          *zap.SugaredLogger
-    S3OffloadLimit  int64
+type AppConfig struct {
+    AWSRegion string
+    S3Bucket  string
+}
+
+func (c *AppConfig) GetAWSRegion() string {
+    return c.AWSRegion
+}
+
+func (c *AppConfig) GetS3Bucket() string {
+    return c.S3Bucket
 }
 
 func NewConfig() (*Config, error) {
@@ -38,7 +40,12 @@ func NewConfig() (*Config, error) {
         return nil, fmt.Errorf("failed to initialize AMQP service: %w", err)
     }
 
-    s3Service, err := storage.NewS3Service()
+    cfg := &AppConfig{
+        AWSRegion: os.Getenv("AWS_REGION"),
+        S3Bucket:  os.Getenv("AWS_S3_BUCKET"),
+    }
+
+    s3Service, err := storage.NewS3Service(cfg)
     if err != nil {
         return nil, fmt.Errorf("failed to initialize S3 service: %w", err)
     }
