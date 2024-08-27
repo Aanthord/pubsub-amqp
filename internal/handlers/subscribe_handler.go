@@ -22,6 +22,17 @@ func NewSubscribeHandler(service amqp.AMQPService) *SubscribeHandler {
 	return &SubscribeHandler{service: service, logger: sugar}
 }
 
+// Handle godoc
+// @Summary Subscribe to a topic
+// @Description Subscribes to the specified AMQP topic and returns the next message
+// @Tags messages
+// @Produce json
+// @Param topic query string true "Topic to subscribe to"
+// @Success 200 {object} SubscribeResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 408 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /subscribe [get]
 func (h *SubscribeHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -31,7 +42,7 @@ func (h *SubscribeHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	topic := r.URL.Query().Get("topic")
 	if topic == "" {
 		h.logger.Error("Missing topic query parameter")
-		http.Error(w, "Missing topic query parameter", http.StatusBadRequest)
+		respondWithError(w, http.StatusBadRequest, "Missing topic query parameter")
 		metrics.HTTPRequestErrors.WithLabelValues("subscribe", "400").Inc()
 		return
 	}
@@ -39,25 +50,29 @@ func (h *SubscribeHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	msgChan, err := h.service.SubscribeToTopic(r.Context(), topic)
 	if err != nil {
 		h.logger.Errorw("Failed to subscribe to topic", "error", err, "topic", topic)
-		http.Error(w, "Failed to subscribe to topic", http.StatusInternalServerError)
+		respondWithError(w, http.StatusInternalServerError, "Failed to subscribe to topic")
 		metrics.HTTPRequestErrors.WithLabelValues("subscribe", "500").Inc()
 		return
 	}
 
 	select {
 	case message := <-msgChan:
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{
-			"topic":   topic,
-			"message": string(message),
+		respondWithJSON(w, http.StatusOK, SubscribeResponse{
+			Topic:   topic,
+			Message: string(message),
 		})
 		h.logger.Infow("Message received from subscription", "topic", topic)
 	case <-r.Context().Done():
 		h.logger.Warn("Client disconnected before receiving message")
-		http.Error(w, "Request cancelled", http.StatusRequestTimeout)
+		respondWithError(w, http.StatusRequestTimeout, "Request cancelled")
 		metrics.HTTPRequestErrors.WithLabelValues("subscribe", "408").Inc()
 		return
 	}
 
 	metrics.HTTPRequestsTotal.WithLabelValues("subscribe").Inc()
+}
+
+type SubscribeResponse struct {
+	Topic   string `json:"topic"`
+	Message string `json:"message"`
 }
