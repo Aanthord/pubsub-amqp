@@ -1,149 +1,129 @@
 package amqp
 
 import (
-	"context"
-	"fmt"
-	"os"
-	"time"
+    "context"
+    "encoding/json"
+    "fmt"
 
-	"github.com/aanthord/pubsub-amqp/internal/config"
-	"github.com/aanthord/pubsub-amqp/internal/metrics"
-	"github.com/streadway/amqp"
-	"go.uber.org/zap"
+    "github.com/aanthord/pubsub-amqp/internal/models"
+    "github.com/aanthord/pubsub-amqp/internal/tracing"
+    "github.com/streadway/amqp"
+    "github.com/opentracing/opentracing-go"
+    "go.uber.org/zap"
 )
 
 type AMQPService interface {
-	PublishMessage(ctx context.Context, topic string, message []byte) error
-	SubscribeToTopic(ctx context.Context, topic string) (<-chan []byte, error)
+    PublishMessage(ctx context.Context, topic string, message *models.MessagePayload) error
+    ConsumeMessages(ctx context.Context, topic string) (<-chan *models.MessagePayload, error)
 }
 
 type amqpService struct {
-	conn   *amqp.Connection
-	logger *zap.SugaredLogger
+    conn    *amqp.Connection
+    channel *amqp.Channel
+    logger  *zap.SugaredLogger
 }
 
-func NewAMQPService() (AMQPService, error) {
-	logger, _ := zap.NewProduction()
-	sugar := logger.Sugar()
+func NewAMQPService(amqpURL string, logger *zap.SugaredLogger) (AMQPService, error) {
+    conn, err := amqp.Dial(amqpURL)
+    if err != nil {
+        return nil, fmt.Errorf("failed to connect to AMQP: %w", err)
+    }
 
-	amqpURL := config.GetEnv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
-	conn, err := amqp.Dial(amqpURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to AMQP: %w", err)
-	}
+    channel, err := conn.Channel()
+    if err != nil {
+        return nil, fmt.Errorf("failed to open a channel: %w", err)
+    }
 
-	return &amqpService{conn: conn, logger: sugar}, nil
+    return &amqpService{
+        conn:    conn,
+        channel: channel,
+        logger:  logger,
+    }, nil
 }
 
-func (s *amqpService) PublishMessage(ctx context.Context, topic string, message []byte) error {
-	start := time.Now()
-	defer func() {
-		metrics.MessagePublishDuration.Observe(time.Since(start).Seconds())
-	}()
+func (s *amqpService) PublishMessage(ctx context.Context, topic string, message *models.MessagePayload) error {
+    span, _ := tracing.StartSpanFromContext(ctx, "AMQPPublish", message.TraceID)
+    defer span.Finish()
 
-	ch, err := s.conn.Channel()
-	if err != nil {
-		return fmt.Errorf("failed to open a channel: %w", err)
-	}
-	defer ch.Close()
+    traceHeaders := tracing.InjectTraceToAMQP(span)
 
-	err = ch.ExchangeDeclare(
-		topic,   // name
-		"topic", // type
-		true,    // durable
-		false,   // auto-deleted
-		false,   // internal
-		false,   // no-wait
-		nil,     // arguments
-	)
-	if err != nil {
-		return fmt.Errorf("failed to declare an exchange: %w", err)
-	}
+    jsonMessage, err := json.Marshal(message)
+    if err != nil {
+        span.SetTag("error", true)
+        span.LogKV("event", "marshal_error", "error.message", err.Error())
+        return fmt.Errorf("failed to marshal message: %w", err)
+    }
 
-	err = ch.Publish(
-		topic, // exchange
-		"",    // routing key
-		false, // mandatory
-		false, // immediate
-		amqp.Publishing{
-			ContentType: "text/plain",
-			Body:        message,
-		})
-	if err != nil {
-		return fmt.Errorf("failed to publish a message: %w", err)
-	}
+    headers := amqp.Table{}
+    for k, v := range traceHeaders {
+        headers[k] = v
+    }
 
-	metrics.MessagesPublished.Inc()
-	s.logger.Infow("Message published", "topic", topic, "size", len(message))
-	return nil
+    err = s.channel.Publish(
+        topic,
+        "",
+        false,
+        false,
+        amqp.Publishing{
+            ContentType: "application/json",
+            Body:        jsonMessage,
+            Headers:     headers,
+        },
+    )
+
+    if err != nil {
+        span.SetTag("error", true)
+        span.LogKV("event", "publish_error", "error.message", err.Error())
+        return fmt.Errorf("failed to publish message: %w", err)
+    }
+
+    span.LogKV("event", "message_published", "message_id", message.ID)
+    return nil
 }
 
-func (s *amqpService) SubscribeToTopic(ctx context.Context, topic string) (<-chan []byte, error) {
-	ch, err := s.conn.Channel()
-	if err != nil {
-		return nil, fmt.Errorf("failed to open a channel: %w", err)
-	}
+func (s *amqpService) ConsumeMessages(ctx context.Context, topic string) (<-chan *models.MessagePayload, error) {
+    span, _ := tracing.StartSpanFromContext(ctx, "AMQPConsume", "")
+    defer span.Finish()
 
-	err = ch.ExchangeDeclare(
-		topic,   // name
-		"topic", // type
-		true,    // durable
-		false,   // auto-deleted
-		false,   // internal
-		false,   // no-wait
-		nil,     // arguments
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to declare an exchange: %w", err)
-	}
+    msgs, err := s.channel.Consume(
+        topic,
+        "",
+        true,
+        false,
+        false,
+        false,
+        nil,
+    )
+    if err != nil {
+        span.SetTag("error", true)
+        span.LogKV("event", "consume_error", "error.message", err.Error())
+        return nil, fmt.Errorf("failed to consume messages: %w", err)
+    }
 
-	q, err := ch.QueueDeclare(
-		"",    // name
-		false, // durable
-		false, // delete when unused
-		true,  // exclusive
-		false, // no-wait
-		nil,   // arguments
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to declare a queue: %w", err)
-	}
+    out := make(chan *models.MessagePayload)
+    go func() {
+        for msg := range msgs {
+            spanContext, _ := tracing.ExtractTraceFromAMQP(msg.Headers)
+            childSpan := opentracing.StartSpan(
+                "ProcessAMQPMessage",
+                opentracing.ChildOf(spanContext),
+            )
 
-	err = ch.QueueBind(
-		q.Name, // queue name
-		"",     // routing key
-		topic,  // exchange
-		false,
-		nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to bind a queue: %w", err)
-	}
+            var payload models.MessagePayload
+            err := json.Unmarshal(msg.Body, &payload)
+            if err != nil {
+                childSpan.SetTag("error", true)
+                childSpan.LogKV("event", "unmarshal_error", "error.message", err.Error())
+                childSpan.Finish()
+                continue
+            }
 
-	msgs, err := ch.Consume(
-		q.Name, // queue
-		"",     // consumer
-		true,   // auto-ack
-		false,  // exclusive
-		false,  // no-local
-		false,  // no-wait
-		nil,    // args
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to register a consumer: %w", err)
-	}
+            childSpan.LogKV("event", "message_received", "message_id", payload.ID, "trace_id", payload.TraceID)
+            out <- &payload
+            childSpan.Finish()
+        }
+        close(out)
+    }()
 
-	messageChan := make(chan []byte)
-	go func() {
-		for d := range msgs {
-			select {
-			case messageChan <- d.Body:
-				metrics.MessagesReceived.Inc()
-				s.logger.Infow("Message received", "topic", topic, "size", len(d.Body))
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-
-	return messageChan, nil
+    return out, nil
 }
