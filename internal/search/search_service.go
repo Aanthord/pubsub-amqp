@@ -6,13 +6,13 @@ import (
 	"time"
 
 	"github.com/aanthord/pubsub-amqp/internal/metrics"
+	"github.com/aanthord/pubsub-amqp/internal/models"
 	"github.com/aanthord/pubsub-amqp/internal/storage"
-	"github.com/neo4j/neo4j-go-driver/v4/neo4j"
 	"go.uber.org/zap"
 )
 
 type SearchService interface {
-	Search(ctx context.Context, query string) ([]neo4j.Record, error)
+	Search(ctx context.Context, query string) ([]models.SearchResult, error)
 }
 
 type searchService struct {
@@ -20,40 +20,53 @@ type searchService struct {
 	logger       *zap.SugaredLogger
 }
 
-func NewSearchService(neo4jService storage.Neo4jService) SearchService {
-	logger, _ := zap.NewProduction()
-	sugar := logger.Sugar()
-
+func NewSearchService(neo4jService storage.Neo4jService, logger *zap.SugaredLogger) SearchService {
 	return &searchService{
 		neo4jService: neo4jService,
-		logger:       sugar,
+		logger:       logger,
 	}
 }
 
-func (s *searchService) Search(ctx context.Context, query string) ([]neo4j.Record, error) {
+func (s *searchService) Search(ctx context.Context, query string) ([]models.SearchResult, error) {
 	start := time.Now()
 	defer func() {
 		metrics.SearchDuration.Observe(time.Since(start).Seconds())
 	}()
 
-	cypher := "MATCH (n) WHERE n.name CONTAINS $query RETURN n"
+	cypher := `
+		MATCH (n)
+		WHERE n.content CONTAINS $query
+		RETURN n.id AS id, labels(n)[0] AS type, n.content AS content,
+		       apoc.text.score(n.content, $query) AS score
+		ORDER BY score DESC
+		LIMIT 10
+	`
 	params := map[string]interface{}{
 		"query": query,
 	}
 
 	result, err := s.neo4jService.ExecuteQuery(ctx, cypher, params)
 	if err != nil {
-		s.logger.Errorw("Failed to execute search query", "error", err, "query", query)
-		return nil, fmt.Errorf("failed to execute search query: %w", err)
+		return nil, fmt.Errorf("failed to execute Neo4j query: %w", err)
 	}
 
-	records, err := result.Collect()
-	if err != nil {
-		s.logger.Errorw("Failed to collect search results", "error", err)
-		return nil, fmt.Errorf("failed to collect search results: %w", err)
+	var searchResults []models.SearchResult
+	for result.Next() {
+		record := result.Record()
+		searchResult := models.SearchResult{
+			ID:      record.GetByIndex(0).(string),
+			Type:    record.GetByIndex(1).(string),
+			Content: record.GetByIndex(2).(map[string]interface{}),
+			Score:   record.GetByIndex(3).(float64),
+		}
+		searchResults = append(searchResults, searchResult)
 	}
 
-	s.logger.Infow("Search executed successfully", "query", query, "results", len(records))
+	s.logger.Infow("Search completed",
+		"query", query,
+		"resultsCount", len(searchResults),
+	)
+
 	metrics.SearchesTotal.Inc()
-	return records, nil
+	return searchResults, nil
 }
