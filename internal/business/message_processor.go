@@ -77,7 +77,7 @@ func (mp *MessageProcessor) offloadToS3(ctx context.Context, topic string, messa
     defer span.Finish()
 
     s3Key := fmt.Sprintf("messages/%s/%s.json", topic, message.Timestamp)
-    s3URI, err := mp.s3Service.UploadFile(ctx, s3Key, jsonMessage)
+    s3URI, err := mp.s3Service.UploadFile(ctx, s3Key, jsonMessage, message.TraceID)
     if err != nil {
         span.SetTag("error", true)
         span.LogKV("event", "s3_upload_error", "error.message", err.Error())
