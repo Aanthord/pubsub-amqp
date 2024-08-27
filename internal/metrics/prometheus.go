@@ -28,6 +28,16 @@ var (
 		Buckets: prometheus.DefBuckets,
 	})
 
+	S3DownloadsTotal = promauto.NewCounter(prometheus.CounterOpts{
+        Name: "s3_downloads_total",
+        Help: "The total number of files downloaded from S3.",
+    })
+
+    S3UploadsTotal = promauto.NewCounter(prometheus.CounterOpts{
+        Name: "s3_uploads_total",
+        Help: "The total number of files uploaded to S3.",
+    })
+	
 	RedshiftQueryDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "redshift_query_duration_seconds",
 		Help:    "The duration of Redshift queries in seconds",

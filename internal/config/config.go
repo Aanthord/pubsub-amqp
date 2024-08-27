@@ -7,9 +7,10 @@ import (
     "strconv"
 
     "github.com/aanthord/pubsub-amqp/internal/amqp"
+    "github.com/aanthord/pubsub-amqp/internal/search"
     "github.com/aanthord/pubsub-amqp/internal/storage"
     "github.com/aanthord/pubsub-amqp/internal/tracing"
-    "github.com/aanthord/pubsub-amqp/internal/types"
+    "github.com/aanthord/pubsub-amqp/internal/uuid"
     "github.com/opentracing/opentracing-go"
     "go.uber.org/zap"
 )
@@ -21,6 +22,7 @@ type AppConfig struct {
     Neo4jUsername      string
     Neo4jPassword      string
     RedshiftConnString string
+    FileStoragePath    string
 }
 
 func (c *AppConfig) GetAWSRegion() string {
@@ -47,13 +49,17 @@ func (c *AppConfig) GetRedshiftConnString() string {
     return c.RedshiftConnString
 }
 
+func (c *AppConfig) GetFileStoragePath() string {
+    return c.FileStoragePath
+}
+
 type Config struct {
     AMQPService     amqp.AMQPService
     S3Service       storage.S3Service
     RedshiftService storage.RedshiftService
     Neo4jService    storage.Neo4jService
-    UUIDService     storage.UUIDService
-    SearchService   storage.SearchService
+    UUIDService     uuid.UUIDService
+    SearchService   search.SearchService
     Tracer          opentracing.Tracer
     TracerCloser    io.Closer
     Logger          *zap.SugaredLogger
@@ -74,9 +80,11 @@ func NewConfig() (*Config, error) {
         Neo4jUsername:      getEnv("NEO4J_USERNAME", "neo4j"),
         Neo4jPassword:      getEnv("NEO4J_PASSWORD", ""),
         RedshiftConnString: getEnv("REDSHIFT_CONN_STRING", "user=username dbname=mydb sslmode=disable"),
+        FileStoragePath:    getEnv("FILE_STORAGE_PATH", "/data/files"),
     }
 
-    amqpService, err := amqp.NewAMQPService()
+    amqpURL := getEnv("AMQP_URL", "amqp://guest:guest@localhost:5672/")
+    amqpService, err := amqp.NewAMQPService(amqpURL, sugar)
     if err != nil {
         return nil, fmt.Errorf("failed to initialize AMQP service: %w", err)
     }
@@ -96,9 +104,16 @@ func NewConfig() (*Config, error) {
         return nil, fmt.Errorf("failed to initialize Neo4j service: %w", err)
     }
 
-    uuidService := storage.NewUUIDService()
+    uuidService := uuid.NewUUIDService()
 
-    searchService := storage.NewSearchService()
+    // Initialize FileStorage with the required arguments
+    fileStorage, err := storage.NewFileStorage(appConfig.GetFileStoragePath(), sugar)
+    if err != nil {
+        return nil, fmt.Errorf("failed to initialize File Storage: %w", err)
+    }
+
+    // Pass the required arguments to NewSearchService
+    searchService := search.NewSearchService(neo4jService, fileStorage, sugar)
 
     tracer, closer, err := tracing.InitJaeger("pubsub-amqp")
     if err != nil {

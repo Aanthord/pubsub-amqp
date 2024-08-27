@@ -35,9 +35,9 @@ func (h *UUIDHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	uuid := h.service.GenerateUUID()
-	
-	respondWithJSON(w, http.StatusOK, UUIDResponse{UUID: uuid})
-	
+
+	respondWithJSON(w, r, http.StatusOK, UUIDResponse{UUID: uuid})
+
 	h.logger.Infow("UUID generated", "uuid", uuid)
 	metrics.HTTPRequestsTotal.WithLabelValues("uuid").Inc()
 }

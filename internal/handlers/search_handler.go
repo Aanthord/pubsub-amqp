@@ -1,13 +1,12 @@
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/aanthord/pubsub-amqp/internal/metrics"
+	"github.com/aanthord/pubsub-amqp/internal/models" // Import the models package
 	"github.com/aanthord/pubsub-amqp/internal/search"
-	"github.com/neo4j/neo4j-go-driver/v4/neo4j"
 	"go.uber.org/zap"
 )
 
@@ -28,7 +27,7 @@ func NewSearchHandler(service search.SearchService) *SearchHandler {
 // @Description Searches for nodes in the graph database
 // @Tags search
 // @Produce json
-// @Param q query string true "Search query"
+// @Param trace_id query string true "Trace ID"
 // @Success 200 {array} map[string]interface{}
 // @Failure 400 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
@@ -39,34 +38,40 @@ func (h *SearchHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		metrics.HTTPRequestDuration.WithLabelValues("search").Observe(time.Since(start).Seconds())
 	}()
 
-	query := r.URL.Query().Get("q")
-	if query == "" {
+	traceID := r.URL.Query().Get("trace_id")
+	if traceID == "" {
 		h.logger.Error("Missing search query parameter")
-		respondWithError(w, http.StatusBadRequest, "Missing search query parameter")
+		respondWithError(w, r, http.StatusBadRequest, "Missing search query parameter")
 		metrics.HTTPRequestErrors.WithLabelValues("search", "400").Inc()
 		return
 	}
 
-	results, err := h.service.Search(r.Context(), query)
+	results, err := h.service.SearchByTraceID(r.Context(), traceID)
 	if err != nil {
-		h.logger.Errorw("Failed to perform search", "error", err, "query", query)
-		respondWithError(w, http.StatusInternalServerError, "Failed to perform search")
+		h.logger.Errorw("Failed to perform search", "error", err, "trace_id", traceID)
+		respondWithError(w, r, http.StatusInternalServerError, "Failed to perform search")
 		metrics.HTTPRequestErrors.WithLabelValues("search", "500").Inc()
 		return
 	}
 
-	respondWithJSON(w, http.StatusOK, resultsToMap(results))
-	
-	h.logger.Infow("Search performed successfully", "query", query, "results", len(results))
+	respondWithJSON(w, r, http.StatusOK, resultsToMap(results))
+
+	h.logger.Infow("Search performed successfully", "trace_id", traceID, "results", len(results))
 	metrics.HTTPRequestsTotal.WithLabelValues("search").Inc()
 }
 
-func resultsToMap(records []neo4j.Record) []map[string]interface{} {
+func resultsToMap(messages []*models.MessagePayload) []map[string]interface{} {
 	var result []map[string]interface{}
-	for _, record := range records {
-		m := make(map[string]interface{})
-		for i := 0; i < record.Length(); i++ {
-			m[record.Keys()[i]] = record.Values()[i]
+	for _, message := range messages {
+		m := map[string]interface{}{
+			"id":        message.ID,
+			"trace_id":  message.TraceID,
+			"sender":    message.Sender,
+			"timestamp": message.Timestamp,
+			"version":   message.Version,
+			"s3_uri":    message.S3URI,
+			"retries":   message.Retries,
+			"content":   message.Content, // assuming content is included
 		}
 		result = append(result, m)
 	}

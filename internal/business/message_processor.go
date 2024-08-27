@@ -107,7 +107,8 @@ func (mp *MessageProcessor) storeMessage(ctx context.Context, message *models.Me
         VALUES ('%s', '%s', '%s', '%s', '%s', '%s', %d)
     `, message.ID, message.TraceID, message.Sender, message.Timestamp, message.Version, message.S3URI, message.Retries)
     
-    err = mp.redshiftService.ExecuteQuery(ctx, query)
+    // Call ExecuteQuery with the SQL query string only
+    err = mp.redshiftService.ExecuteQuery(query)
     if err != nil {
         span.SetTag("error", true)
         span.LogKV("event", "redshift_error", "error.message", err.Error())
