@@ -34,10 +34,20 @@ var (
 		Buckets: prometheus.DefBuckets,
 	})
 
+	RedshiftQueriesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "redshift_queries_total",
+		Help: "The total number of Redshift queries executed",
+	})
+
 	Neo4jQueryDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "neo4j_query_duration_seconds",
 		Help:    "The duration of Neo4j queries in seconds",
 		Buckets: prometheus.DefBuckets,
+	})
+
+	Neo4jQueriesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "neo4j_queries_total",
+		Help: "The total number of Neo4j queries executed",
 	})
 
 	SearchDuration = promauto.NewHistogram(prometheus.HistogramOpts{
