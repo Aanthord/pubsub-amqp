@@ -103,7 +103,15 @@ func (s *amqpService) ConsumeMessages(ctx context.Context, topic string) (<-chan
     out := make(chan *models.MessagePayload)
     go func() {
         for msg := range msgs {
-            spanContext, _ := tracing.ExtractTraceFromAMQP(msg.Headers)
+            // Convert amqp.Table to map[string]string
+            headers := make(map[string]string)
+            for k, v := range msg.Headers {
+                if strVal, ok := v.(string); ok {
+                    headers[k] = strVal
+                }
+            }
+            
+            spanContext, _ := tracing.ExtractTraceFromAMQP(headers)
             childSpan := opentracing.StartSpan(
                 "ProcessAMQPMessage",
                 opentracing.ChildOf(spanContext),
