@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 
@@ -22,6 +21,13 @@ func NewUUIDHandler(service uuid.UUIDService) *UUIDHandler {
 	return &UUIDHandler{service: service, logger: sugar}
 }
 
+// Handle godoc
+// @Summary Generate a UUID
+// @Description Generates a new UUID
+// @Tags uuid
+// @Produce json
+// @Success 200 {object} UUIDResponse
+// @Router /uuid [get]
 func (h *UUIDHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	defer func() {
@@ -30,9 +36,12 @@ func (h *UUIDHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	uuid := h.service.GenerateUUID()
 	
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"uuid": uuid})
+	respondWithJSON(w, http.StatusOK, UUIDResponse{UUID: uuid})
 	
 	h.logger.Infow("UUID generated", "uuid", uuid)
 	metrics.HTTPRequestsTotal.WithLabelValues("uuid").Inc()
+}
+
+type UUIDResponse struct {
+	UUID string `json:"uuid"`
 }
