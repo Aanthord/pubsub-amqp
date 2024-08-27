@@ -1,57 +1,66 @@
 package tracing
 
 import (
-	"fmt"
-	"io"
-	"net/http"
+    "context"
+    "fmt"
+    "io"
+    "os"
 
-	"github.com/aanthord/pubsub-amqp/internal/config"
-	"github.com/opentracing/opentracing-go"
-	"github.com/opentracing/opentracing-go/ext"
-	"github.com/uber/jaeger-client-go"
-	jaegercfg "github.com/uber/jaeger-client-go/config"
-	jaegerlog "github.com/uber/jaeger-client-go/log"
-	"github.com/uber/jaeger-lib/metrics"
+    "github.com/opentracing/opentracing-go"
+    "github.com/uber/jaeger-client-go"
+    jaegercfg "github.com/uber/jaeger-client-go/config"
+    jaegerlog "github.com/uber/jaeger-client-go/log"
+    "github.com/uber/jaeger-lib/metrics"
 )
 
-// InitJaeger returns an instance of Jaeger Tracer
 func InitJaeger(service string) (opentracing.Tracer, io.Closer, error) {
-	cfg := jaegercfg.Configuration{
-		ServiceName: service,
-		Sampler: &jaegercfg.SamplerConfig{
-			Type:  jaeger.SamplerTypeConst,
-			Param: 1,
-		},
-		Reporter: &jaegercfg.ReporterConfig{
-			LogSpans: true,
-			LocalAgentHostPort: fmt.Sprintf("%s:%s",
-				config.GetEnv("JAEGER_AGENT_HOST", "localhost"),
-				config.GetEnv("JAEGER_AGENT_PORT", "6831"),
-			),
-		},
-	}
+    cfg := jaegercfg.Configuration{
+        ServiceName: service,
+        Sampler: &jaegercfg.SamplerConfig{
+            Type:  jaeger.SamplerTypeConst,
+            Param: 1,
+        },
+        Reporter: &jaegercfg.ReporterConfig{
+            LogSpans:           true,
+            LocalAgentHostPort: os.Getenv("JAEGER_AGENT_HOST") + ":" + os.Getenv("JAEGER_AGENT_PORT"),
+        },
+    }
 
-	jLogger := jaegerlog.StdLogger
-	jMetricsFactory := metrics.NullFactory
+    jLogger := jaegerlog.StdLogger
+    jMetricsFactory := metrics.NullFactory
 
-	return cfg.NewTracer(
-		jaegercfg.Logger(jLogger),
-		jaegercfg.Metrics(jMetricsFactory),
-	)
+    tracer, closer, err := cfg.NewTracer(
+        jaegercfg.Logger(jLogger),
+        jaegercfg.Metrics(jMetricsFactory),
+    )
+    if err != nil {
+        return nil, nil, fmt.Errorf("failed to create tracer: %w", err)
+    }
+
+    opentracing.SetGlobalTracer(tracer)
+    return tracer, closer, nil
 }
 
-// Middleware creates a new span for each incoming request
-func Middleware(tracer opentracing.Tracer) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			spanCtx, _ := tracer.Extract(opentracing.HTTPHeaders, opentracing.HTTPHeadersCarrier(r.Header))
-			span := tracer.StartSpan("http_server", ext.RPCServerOption(spanCtx))
-			defer span.Finish()
+func StartSpanFromContext(ctx context.Context, operationName, traceID string) (opentracing.Span, context.Context) {
+    var span opentracing.Span
+    if parent := opentracing.SpanFromContext(ctx); parent != nil {
+        span = opentracing.StartSpan(operationName, opentracing.ChildOf(parent.Context()))
+    } else {
+        span = opentracing.StartSpan(operationName)
+    }
+    span.SetTag("trace_id", traceID)
+    return span, opentracing.ContextWithSpan(ctx, span)
+}
 
-			ctx := opentracing.ContextWithSpan(r.Context(), span)
-			r = r.WithContext(ctx)
+func InjectTraceToAMQP(span opentracing.Span) map[string]string {
+    carrier := make(opentracing.TextMapCarrier)
+    err := opentracing.GlobalTracer().Inject(span.Context(), opentracing.TextMap, carrier)
+    if err != nil {
+        // Handle error
+    }
+    return carrier
+}
 
-			next.ServeHTTP(w, r)
-		})
-	}
+func ExtractTraceFromAMQP(headers map[string]string) (opentracing.SpanContext, error) {
+    return opentracing.GlobalTracer().Extract(opentracing.TextMap, opentracing.TextMapCarrier(headers))
 }
