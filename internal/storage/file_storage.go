@@ -8,6 +8,7 @@ import (
     "os"
     "path/filepath"
     "sync"
+    "bytes"
 
     "github.com/aanthord/pubsub-amqp/internal/models"
     "github.com/aanthord/pubsub-amqp/internal/tracing"
