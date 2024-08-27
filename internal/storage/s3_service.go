@@ -7,9 +7,9 @@ import (
     "io/ioutil"
     "time"
 
-    "github.com/aanthord/pubsub-amqp/internal/config"
     "github.com/aanthord/pubsub-amqp/internal/metrics"
     "github.com/aanthord/pubsub-amqp/internal/tracing"
+    "github.com/aanthord/pubsub-amqp/internal/types"
     "github.com/aws/aws-sdk-go/aws"
     "github.com/aws/aws-sdk-go/aws/session"
     "github.com/aws/aws-sdk-go/service/s3"
@@ -27,18 +27,18 @@ type s3Service struct {
     logger *zap.SugaredLogger
 }
 
-func NewS3Service() (S3Service, error) {
+func NewS3Service(config types.ConfigProvider) (S3Service, error) {
     logger, _ := zap.NewProduction()
     sugar := logger.Sugar()
 
     sess, err := session.NewSession(&aws.Config{
-        Region: aws.String(config.GetEnv("AWS_REGION", "us-west-2")),
+        Region: aws.String(config.GetAWSRegion()),
     })
     if err != nil {
         return nil, fmt.Errorf("failed to create AWS session: %w", err)
     }
 
-    bucket := config.GetEnv("AWS_S3_BUCKET", "my-default-bucket")
+    bucket := config.GetS3Bucket()
 
     return &s3Service{
         client: s3.New(sess),
