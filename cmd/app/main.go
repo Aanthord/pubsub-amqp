@@ -61,7 +61,6 @@ func main() {
         cfg.AMQPService,
         cfg.S3Service,
         cfg.RedshiftService,
-        cfg.Neo4jService,
         cfg.Logger,
         cfg.S3OffloadLimit,
     )
