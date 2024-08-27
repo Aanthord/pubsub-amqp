@@ -7,6 +7,8 @@ import (
     "io/ioutil"
     "time"
 
+    "github.com/aanthord/pubsub-amqp/internal/config"
+    "github.com/aanthord/pubsub-amqp/internal/metrics"
     "github.com/aanthord/pubsub-amqp/internal/tracing"
     "github.com/aws/aws-sdk-go/aws"
     "github.com/aws/aws-sdk-go/aws/session"
@@ -25,18 +27,23 @@ type s3Service struct {
     logger *zap.SugaredLogger
 }
 
-func NewS3Service(region, bucket string, logger *zap.SugaredLogger) (S3Service, error) {
+func NewS3Service() (S3Service, error) {
+    logger, _ := zap.NewProduction()
+    sugar := logger.Sugar()
+
     sess, err := session.NewSession(&aws.Config{
-        Region: aws.String(region),
+        Region: aws.String(config.GetEnv("AWS_REGION", "us-west-2")),
     })
     if err != nil {
         return nil, fmt.Errorf("failed to create AWS session: %w", err)
     }
 
+    bucket := config.GetEnv("AWS_S3_BUCKET", "my-default-bucket")
+
     return &s3Service{
         client: s3.New(sess),
         bucket: bucket,
-        logger: logger,
+        logger: sugar,
     }, nil
 }
 
@@ -44,7 +51,11 @@ func (s *s3Service) UploadFile(ctx context.Context, key string, content []byte, 
     span, ctx := tracing.StartSpanFromContext(ctx, "S3Upload", traceID)
     defer span.Finish()
 
-    // Upload the file
+    start := time.Now()
+    defer func() {
+        metrics.S3UploadDuration.Observe(time.Since(start).Seconds())
+    }()
+
     _, err := s.client.PutObjectWithContext(ctx, &s3.PutObjectInput{
         Bucket: aws.String(s.bucket),
         Key:    aws.String(key),
@@ -53,10 +64,10 @@ func (s *s3Service) UploadFile(ctx context.Context, key string, content []byte, 
     if err != nil {
         span.SetTag("error", true)
         span.LogKV("event", "s3_upload_error", "error.message", err.Error())
+        s.logger.Errorw("Failed to upload to S3", "error", err)
         return "", fmt.Errorf("failed to upload to S3: %w", err)
     }
 
-    // Create metadata
     _, err = s.client.PutObjectTaggingWithContext(ctx, &s3.PutObjectTaggingInput{
         Bucket: aws.String(s.bucket),
         Key:    aws.String(key),
@@ -76,17 +87,25 @@ func (s *s3Service) UploadFile(ctx context.Context, key string, content []byte, 
     if err != nil {
         span.SetTag("error", true)
         span.LogKV("event", "s3_metadata_error", "error.message", err.Error())
+        s.logger.Errorw("Failed to add metadata to S3 object", "error", err)
         return "", fmt.Errorf("failed to add metadata to S3 object: %w", err)
     }
 
     s3URI := fmt.Sprintf("s3://%s/%s", s.bucket, key)
     span.LogKV("event", "s3_upload_success", "s3_uri", s3URI)
+    s.logger.Infow("File uploaded successfully to S3", "s3_uri", s3URI)
+    metrics.S3UploadsTotal.Inc()
     return s3URI, nil
 }
 
 func (s *s3Service) GetFile(ctx context.Context, key string) ([]byte, error) {
     span, ctx := tracing.StartSpanFromContext(ctx, "S3Get", "")
     defer span.Finish()
+
+    start := time.Now()
+    defer func() {
+        metrics.S3DownloadDuration.Observe(time.Since(start).Seconds())
+    }()
 
     result, err := s.client.GetObjectWithContext(ctx, &s3.GetObjectInput{
         Bucket: aws.String(s.bucket),
@@ -95,6 +114,7 @@ func (s *s3Service) GetFile(ctx context.Context, key string) ([]byte, error) {
     if err != nil {
         span.SetTag("error", true)
         span.LogKV("event", "s3_get_error", "error.message", err.Error())
+        s.logger.Errorw("Failed to get file from S3", "error", err)
         return nil, fmt.Errorf("failed to get file from S3: %w", err)
     }
     defer result.Body.Close()
@@ -103,10 +123,10 @@ func (s *s3Service) GetFile(ctx context.Context, key string) ([]byte, error) {
     if err != nil {
         span.SetTag("error", true)
         span.LogKV("event", "s3_read_error", "error.message", err.Error())
+        s.logger.Errorw("Failed to read S3 object body", "error", err)
         return nil, fmt.Errorf("failed to read S3 object body: %w", err)
     }
 
-    // Get and log metadata
     taggingResult, err := s.client.GetObjectTaggingWithContext(ctx, &s3.GetObjectTaggingInput{
         Bucket: aws.String(s.bucket),
         Key:    aws.String(key),
@@ -120,5 +140,7 @@ func (s *s3Service) GetFile(ctx context.Context, key string) ([]byte, error) {
     }
 
     span.LogKV("event", "s3_get_success", "key", key)
+    s.logger.Infow("File retrieved successfully from S3", "key", key)
+    metrics.S3DownloadsTotal.Inc()
     return content, nil
 }
