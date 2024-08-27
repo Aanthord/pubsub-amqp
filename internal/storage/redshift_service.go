@@ -1,93 +1,47 @@
 package storage
 
 import (
-	"bytes"
-	"context"
-	"fmt"
-	"io/ioutil"
-	"time"
+    "context"
+    "database/sql"
+    "fmt"
 
-	"github.com/aanthord/pubsub-amqp/internal/config"
-	"github.com/aanthord/pubsub-amqp/internal/metrics"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"go.uber.org/zap"
+    "github.com/aanthord/pubsub-amqp/internal/tracing"
+    _ "github.com/lib/pq"
+    "go.uber.org/zap"
 )
 
-type S3Service interface {
-	UploadFile(ctx context.Context, key string, content []byte) (string, error)
-	GetFile(ctx context.Context, key string) ([]byte, error)
+type RedshiftService interface {
+    ExecuteQuery(ctx context.Context, query string) error
 }
 
-type s3Service struct {
-	client *s3.S3
-	bucket string
-	logger *zap.SugaredLogger
+type redshiftService struct {
+    db     *sql.DB
+    logger *zap.SugaredLogger
 }
 
-func NewS3Service() (S3Service, error) {
-	logger, _ := zap.NewProduction()
-	sugar := logger.Sugar()
+func NewRedshiftService(connStr string, logger *zap.SugaredLogger) (RedshiftService, error) {
+    db, err := sql.Open("postgres", connStr)
+    if err != nil {
+        return nil, fmt.Errorf("failed to connect to Redshift: %w", err)
+    }
 
-	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String(config.GetEnv("AWS_REGION", "us-west-2")),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create AWS session: %w", err)
-	}
-
-	return &s3Service{
-		client: s3.New(sess),
-		bucket: config.GetEnv("S3_BUCKET_NAME", ""),
-		logger: sugar,
-	}, nil
+    return &redshiftService{
+        db:     db,
+        logger: logger,
+    }, nil
 }
 
-func (s *s3Service) UploadFile(ctx context.Context, key string, content []byte) (string, error) {
-	start := time.Now()
-	defer func() {
-		metrics.S3UploadDuration.Observe(time.Since(start).Seconds())
-	}()
+func (s *redshiftService) ExecuteQuery(ctx context.Context, query string) error {
+    span, ctx := tracing.StartSpanFromContext(ctx, "RedshiftQuery", "")
+    defer span.Finish()
 
-	_, err := s.client.PutObjectWithContext(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-		Body:   bytes.NewReader(content),
-	})
-	if err != nil {
-		s.logger.Errorw("Failed to upload to S3", "error", err, "key", key)
-		return "", fmt.Errorf("failed to upload to S3: %w", err)
-	}
+    _, err := s.db.ExecContext(ctx, query)
+    if err != nil {
+        span.SetTag("error", true)
+        span.LogKV("event", "redshift_query_error", "error.message", err.Error())
+        return fmt.Errorf("failed to execute Redshift query: %w", err)
+    }
 
-	s3URI := fmt.Sprintf("s3://%s/%s", s.bucket, key)
-	s.logger.Infow("File uploaded to S3", "uri", s3URI, "size", len(content))
-	metrics.S3UploadsTotal.Inc()
-	return s3URI, nil
-}
-
-func (s *s3Service) GetFile(ctx context.Context, key string) ([]byte, error) {
-	start := time.Now()
-	defer func() {
-		metrics.S3DownloadDuration.Observe(time.Since(start).Seconds())
-	}()
-
-	result, err := s.client.GetObjectWithContext(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		s.logger.Errorw("Failed to get file from S3", "error", err, "key", key)
-		return nil, fmt.Errorf("failed to get file from S3: %w", err)
-	}
-	defer result.Body.Close()
-
-	content, err := ioutil.ReadAll(result.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read S3 object body: %w", err)
-	}
-
-	s.logger.Infow("File downloaded from S3", "key", key, "size", len(content))
-	metrics.S3DownloadsTotal.Inc()
-	return content, nil
+    span.LogKV("event", "redshift_query_success")
+    return nil
 }
