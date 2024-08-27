@@ -6,18 +6,20 @@ import (
     "os"
     "strconv"
 
-    "github.com/aanthord/pubsub-amqp/internal/types"
+    "github.com/aanthord/pubsub-amqp/internal/amqp"
+    "github.com/aanthord/pubsub-amqp/internal/storage"
+    "github.com/aanthord/pubsub-amqp/internal/tracing"
     "github.com/opentracing/opentracing-go"
     "go.uber.org/zap"
 )
 
 type Config struct {
-    AMQPService     types.AMQPService
-    S3Service       types.S3Service
-    RedshiftService types.RedshiftService
-    Neo4jService    types.Neo4jService
-    UUIDService     types.UUIDService
-    SearchService   types.SearchService
+    AMQPService     amqp.AMQPService
+    S3Service       storage.S3Service
+    RedshiftService storage.RedshiftService
+    Neo4jService    storage.Neo4jService
+    UUIDService     storage.UUIDService
+    SearchService   storage.SearchService
     Tracer          opentracing.Tracer
     TracerCloser    io.Closer
     Logger          *zap.SugaredLogger
@@ -31,31 +33,31 @@ func NewConfig() (*Config, error) {
     }
     sugar := logger.Sugar()
 
-    amqpService, err := NewAMQPService()
+    amqpService, err := amqp.NewAMQPService()
     if err != nil {
         return nil, fmt.Errorf("failed to initialize AMQP service: %w", err)
     }
 
-    s3Service, err := NewS3Service()
+    s3Service, err := storage.NewS3Service()
     if err != nil {
         return nil, fmt.Errorf("failed to initialize S3 service: %w", err)
     }
 
-    redshiftService, err := NewRedshiftService()
+    redshiftService, err := storage.NewRedshiftService()
     if err != nil {
         return nil, fmt.Errorf("failed to initialize Redshift service: %w", err)
     }
 
-    neo4jService, err := NewNeo4jService()
+    neo4jService, err := storage.NewNeo4jService()
     if err != nil {
         return nil, fmt.Errorf("failed to initialize Neo4j service: %w", err)
     }
 
-    uuidService := NewUUIDService()
+    uuidService := storage.NewUUIDService()
 
-    searchService := NewSearchService(neo4jService)
+    searchService := storage.NewSearchService()
 
-    tracer, closer, err := InitJaeger("pubsub-amqp")
+    tracer, closer, err := tracing.InitJaeger("pubsub-amqp")
     if err != nil {
         return nil, fmt.Errorf("failed to initialize Jaeger tracer: %w", err)
     }
@@ -76,17 +78,14 @@ func NewConfig() (*Config, error) {
     }, nil
 }
 
-func GetEnv(key, defaultValue string) string {
-    if value, exists := os.LookupEnv(key); exists {
-        return value
-    }
-    return defaultValue
-}
-
 func getEnvAsInt64(key string, defaultValue int64) int64 {
-    valueStr := GetEnv(key, "")
-    if value, err := strconv.ParseInt(valueStr, 10, 64); err == nil {
-        return value
+    valueStr := os.Getenv(key)
+    if valueStr == "" {
+        return defaultValue
     }
-    return defaultValue
+    value, err := strconv.ParseInt(valueStr, 10, 64)
+    if err != nil {
+        return defaultValue
+    }
+    return value
 }
