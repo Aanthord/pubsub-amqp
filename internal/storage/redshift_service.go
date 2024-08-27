@@ -1,17 +1,17 @@
 package storage
 
 import (
-    "context"
     "database/sql"
     "fmt"
-
-    "github.com/aanthord/pubsub-amqp/internal/tracing"
+    "github.com/aanthord/pubsub-amqp/internal/config"
+    "github.com/aanthord/pubsub-amqp/internal/metrics"
     _ "github.com/lib/pq"
+    "time"
     "go.uber.org/zap"
 )
 
 type RedshiftService interface {
-    ExecuteQuery(ctx context.Context, query string) error
+    ExecuteQuery(query string) error
 }
 
 type redshiftService struct {
@@ -19,29 +19,32 @@ type redshiftService struct {
     logger *zap.SugaredLogger
 }
 
-func NewRedshiftService(connStr string, logger *zap.SugaredLogger) (RedshiftService, error) {
+func NewRedshiftService() (RedshiftService, error) {
+    logger, _ := zap.NewProduction()
+    sugar := logger.Sugar()
+
+    connStr := config.GetEnv("REDSHIFT_CONN_STRING", "user=username dbname=mydb sslmode=disable")
     db, err := sql.Open("postgres", connStr)
     if err != nil {
         return nil, fmt.Errorf("failed to connect to Redshift: %w", err)
     }
 
-    return &redshiftService{
-        db:     db,
-        logger: logger,
-    }, nil
+    return &redshiftService{db: db, logger: sugar}, nil
 }
 
-func (s *redshiftService) ExecuteQuery(ctx context.Context, query string) error {
-    span, ctx := tracing.StartSpanFromContext(ctx, "RedshiftQuery", "")
-    defer span.Finish()
+func (r *redshiftService) ExecuteQuery(query string) error {
+    start := time.Now()
+    defer func() {
+        metrics.RedshiftQueryDuration.Observe(time.Since(start).Seconds())
+    }()
 
-    _, err := s.db.ExecContext(ctx, query)
+    _, err := r.db.Exec(query)
     if err != nil {
-        span.SetTag("error", true)
-        span.LogKV("event", "redshift_query_error", "error.message", err.Error())
+        r.logger.Errorw("Failed to execute Redshift query", "error", err)
         return fmt.Errorf("failed to execute Redshift query: %w", err)
     }
 
-    span.LogKV("event", "redshift_query_success")
+    r.logger.Infow("Redshift query executed successfully")
+    metrics.RedshiftQueriesTotal.Inc()
     return nil
 }
