@@ -3,8 +3,8 @@ package storage
 import (
     "database/sql"
     "fmt"
-    "github.com/aanthord/pubsub-amqp/internal/config"
     "github.com/aanthord/pubsub-amqp/internal/metrics"
+    "github.com/aanthord/pubsub-amqp/internal/types"
     _ "github.com/lib/pq"
     "time"
     "go.uber.org/zap"
@@ -19,11 +19,11 @@ type redshiftService struct {
     logger *zap.SugaredLogger
 }
 
-func NewRedshiftService() (RedshiftService, error) {
+func NewRedshiftService(config types.ConfigProvider) (RedshiftService, error) {
     logger, _ := zap.NewProduction()
     sugar := logger.Sugar()
 
-    connStr := config.GetEnv("REDSHIFT_CONN_STRING", "user=username dbname=mydb sslmode=disable")
+    connStr := config.GetRedshiftConnString()
     db, err := sql.Open("postgres", connStr)
     if err != nil {
         return nil, fmt.Errorf("failed to connect to Redshift: %w", err)
