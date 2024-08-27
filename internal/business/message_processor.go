@@ -4,13 +4,11 @@ import (
     "context"
     "encoding/json"
     "fmt"
-    "time"
 
     "github.com/aanthord/pubsub-amqp/internal/amqp"
     "github.com/aanthord/pubsub-amqp/internal/models"
     "github.com/aanthord/pubsub-amqp/internal/storage"
     "github.com/aanthord/pubsub-amqp/internal/tracing"
-    "github.com/cenkalti/backoff/v4"
     "go.uber.org/zap"
 )
 
@@ -35,11 +33,13 @@ func NewMessageProcessor(amqpService amqp.AMQPService, s3Service storage.S3Servi
 }
 
 func (mp *MessageProcessor) ProcessMessage(ctx context.Context, topic string, message *models.MessagePayload) error {
-    span, ctx := tracing.StartSpanFromContext(ctx, "ProcessMessage")
+    span, ctx := tracing.StartSpanFromContext(ctx, "ProcessMessage", message.TraceID)
     defer span.Finish()
 
     jsonMessage, err := json.Marshal(message)
     if err != nil {
+        span.SetTag("error", true)
+        span.LogKV("event", "marshal_error", "error.message", err.Error())
         return fmt.Errorf("failed to marshal message: %w", err)
     }
 
@@ -55,78 +55,80 @@ func (mp *MessageProcessor) ProcessMessage(ctx context.Context, topic string, me
         return err
     }
 
-    err = mp.publishToAMQP(ctx, topic, jsonMessage)
+    err = mp.publishToAMQP(ctx, topic, message)
     if err != nil {
         return err
     }
 
     mp.logger.Infow("Message processed successfully",
         "id", message.ID,
+        "trace_id", message.TraceID,
         "sender", message.Sender,
         "timestamp", message.Timestamp,
         "topic", topic,
         "s3URI", message.S3URI,
-        "traceID", message.TraceID,
     )
 
     return nil
 }
 
 func (mp *MessageProcessor) offloadToS3(ctx context.Context, topic string, message *models.MessagePayload, jsonMessage []byte) error {
-    span, ctx := tracing.StartSpanFromContext(ctx, "OffloadToS3")
+    span, ctx := tracing.StartSpanFromContext(ctx, "OffloadToS3", message.TraceID)
     defer span.Finish()
 
     s3Key := fmt.Sprintf("messages/%s/%s.json", topic, message.Timestamp)
     s3URI, err := mp.s3Service.UploadFile(ctx, s3Key, jsonMessage)
     if err != nil {
+        span.SetTag("error", true)
+        span.LogKV("event", "s3_upload_error", "error.message", err.Error())
         return fmt.Errorf("failed to upload message to S3: %w", err)
     }
     
     message.S3URI = s3URI
     message.Content = nil
     
+    span.LogKV("event", "s3_upload_success", "s3_uri", s3URI)
     return nil
 }
 
 func (mp *MessageProcessor) storeMessage(ctx context.Context, message *models.MessagePayload) error {
-    span, ctx := tracing.StartSpanFromContext(ctx, "StoreMessage")
+    span, ctx := tracing.StartSpanFromContext(ctx, "StoreMessage", message.TraceID)
     defer span.Finish()
 
-    err := backoff.Retry(func() error {
-        return mp.fileStorage.Store(message)
-    }, backoff.NewExponentialBackOff())
-
+    err := mp.fileStorage.Store(ctx, message)
     if err != nil {
+        span.SetTag("error", true)
+        span.LogKV("event", "file_storage_error", "error.message", err.Error())
         return fmt.Errorf("failed to store message in file storage: %w", err)
     }
 
     query := fmt.Sprintf(`
-        INSERT INTO messages (id, sender, timestamp, version, s3_uri, trace_id, retries)
+        INSERT INTO messages (id, trace_id, sender, timestamp, version, s3_uri, retries)
         VALUES ('%s', '%s', '%s', '%s', '%s', '%s', %d)
-    `, message.ID, message.Sender, message.Timestamp, message.Version, message.S3URI, message.TraceID, message.Retries)
+    `, message.ID, message.TraceID, message.Sender, message.Timestamp, message.Version, message.S3URI, message.Retries)
     
-    err = backoff.Retry(func() error {
-        return mp.redshiftService.ExecuteQuery(ctx, query)
-    }, backoff.NewExponentialBackOff())
-
+    err = mp.redshiftService.ExecuteQuery(ctx, query)
     if err != nil {
+        span.SetTag("error", true)
+        span.LogKV("event", "redshift_error", "error.message", err.Error())
         return fmt.Errorf("failed to insert message metadata into Redshift: %w", err)
     }
 
+    span.LogKV("event", "message_stored")
     return nil
 }
 
-func (mp *MessageProcessor) publishToAMQP(ctx context.Context, topic string, jsonMessage []byte) error {
-    span, ctx := tracing.StartSpanFromContext(ctx, "PublishToAMQP")
+func (mp *MessageProcessor) publishToAMQP(ctx context.Context, topic string, message *models.MessagePayload) error {
+    span, ctx := tracing.StartSpanFromContext(ctx, "PublishToAMQP", message.TraceID)
     defer span.Finish()
 
-    err := backoff.Retry(func() error {
-        return mp.amqpService.PublishMessage(ctx, topic, jsonMessage)
-    }, backoff.NewExponentialBackOff())
-
+    err := mp.amqpService.PublishMessage(ctx, topic, message)
     if err != nil {
+        span.SetTag("error", true)
+        span.LogKV("event", "amqp_publish_error", "error.message", err.Error())
         return fmt.Errorf("failed to publish message to AMQP: %w", err)
     }
 
+    span.LogKV("event", "message_published")
     return nil
 }
