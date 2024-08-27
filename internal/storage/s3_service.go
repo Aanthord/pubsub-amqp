@@ -5,6 +5,7 @@ import (
     "context"
     "fmt"
     "io/ioutil"
+    "time"
 
     "github.com/aanthord/pubsub-amqp/internal/tracing"
     "github.com/aws/aws-sdk-go/aws"
@@ -14,7 +15,7 @@ import (
 )
 
 type S3Service interface {
-    UploadFile(ctx context.Context, key string, content []byte) (string, error)
+    UploadFile(ctx context.Context, key string, content []byte, traceID string) (string, error)
     GetFile(ctx context.Context, key string) ([]byte, error)
 }
 
@@ -39,10 +40,11 @@ func NewS3Service(region, bucket string, logger *zap.SugaredLogger) (S3Service, 
     }, nil
 }
 
-func (s *s3Service) UploadFile(ctx context.Context, key string, content []byte) (string, error) {
-    span, ctx := tracing.StartSpanFromContext(ctx, "S3Upload", "")
+func (s *s3Service) UploadFile(ctx context.Context, key string, content []byte, traceID string) (string, error) {
+    span, ctx := tracing.StartSpanFromContext(ctx, "S3Upload", traceID)
     defer span.Finish()
 
+    // Upload the file
     _, err := s.client.PutObjectWithContext(ctx, &s3.PutObjectInput{
         Bucket: aws.String(s.bucket),
         Key:    aws.String(key),
@@ -52,6 +54,35 @@ func (s *s3Service) UploadFile(ctx context.Context, key string, content []byte) 
         span.SetTag("error", true)
         span.LogKV("event", "s3_upload_error", "error.message", err.Error())
         return "", fmt.Errorf("failed to upload to S3: %w", err)
+    }
+
+    // Create metadata
+    metadata := map[string]*string{
+        "TraceID":   aws.String(traceID),
+        "Timestamp": aws.String(time.Now().UTC().Format(time.RFC3339)),
+    }
+
+    // Update the object with metadata
+    _, err = s.client.PutObjectTaggingWithContext(ctx, &s3.PutObjectTaggingInput{
+        Bucket: aws.String(s.bucket),
+        Key:    aws.String(key),
+        Tagging: &s3.Tagging{
+            TagSet: []*s3.Tag{
+                {
+                    Key:   aws.String("TraceID"),
+                    Value: aws.String(traceID),
+                },
+                {
+                    Key:   aws.String("Timestamp"),
+                    Value: aws.String(time.Now().UTC().Format(time.RFC3339)),
+                },
+            },
+        },
+    })
+    if err != nil {
+        span.SetTag("error", true)
+        span.LogKV("event", "s3_metadata_error", "error.message", err.Error())
+        return "", fmt.Errorf("failed to add metadata to S3 object: %w", err)
     }
 
     s3URI := fmt.Sprintf("s3://%s/%s", s.bucket, key)
@@ -79,6 +110,19 @@ func (s *s3Service) GetFile(ctx context.Context, key string) ([]byte, error) {
         span.SetTag("error", true)
         span.LogKV("event", "s3_read_error", "error.message", err.Error())
         return nil, fmt.Errorf("failed to read S3 object body: %w", err)
+    }
+
+    // Get and log metadata
+    taggingResult, err := s.client.GetObjectTaggingWithContext(ctx, &s3.GetObjectTaggingInput{
+        Bucket: aws.String(s.bucket),
+        Key:    aws.String(key),
+    })
+    if err != nil {
+        s.logger.Warnw("Failed to get S3 object tags", "error", err)
+    } else {
+        for _, tag := range taggingResult.TagSet {
+            span.LogKV(fmt.Sprintf("s3_metadata_%s", *tag.Key), *tag.Value)
+        }
     }
 
     span.LogKV("event", "s3_get_success", "key", key)
