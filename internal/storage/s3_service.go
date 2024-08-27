@@ -57,12 +57,6 @@ func (s *s3Service) UploadFile(ctx context.Context, key string, content []byte, 
     }
 
     // Create metadata
-    metadata := map[string]*string{
-        "TraceID":   aws.String(traceID),
-        "Timestamp": aws.String(time.Now().UTC().Format(time.RFC3339)),
-    }
-
-    // Update the object with metadata
     _, err = s.client.PutObjectTaggingWithContext(ctx, &s3.PutObjectTaggingInput{
         Bucket: aws.String(s.bucket),
         Key:    aws.String(key),
