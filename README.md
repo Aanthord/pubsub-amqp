@@ -23,20 +23,75 @@ This project implements a robust Publish-Subscribe (PubSub) service using AMQP (
 
 ## Features
 
-- AMQP-based publish-subscribe messaging
-- RESTful API for publishing and subscribing to topics
-- Distributed tracing with Jaeger
-- Metrics collection with Prometheus
-- Data persistence with:
-  - Amazon S3 for large message payloads
-  - Amazon Redshift for analytics
-  - Neo4j for graph-based data relationships
-  - Local file storage for quick access
-- UUID generation service
-- Search functionality across persisted data
-- Configurable CORS settings
-- Swagger API documentation
-- Dockerized deployment
+1. **AMQP-based Publish-Subscribe Messaging**: Robust message queuing using the Advanced Message Queuing Protocol.
+
+2. **RESTful API**: For publishing and subscribing to topics, with full CRUD operations.
+
+3. **Bidirectional Tracing**: 
+   - Track the lifecycle of data both forwards and backwards, from creation to its final state.
+   - Enables comprehensive auditing and data lineage tracking.
+
+4. **Granular Traceability**: 
+   - Capture detailed logs and traces for every function and sub-function within the system.
+   - Categorized by topic and subtopic for easy navigation and analysis.
+
+5. **Human-Readable Traces**: 
+   - Each trace includes logical descriptions and human-readable data.
+   - Ensures explainability and ease of understanding for both technical and non-technical users.
+
+6. **Advanced Distributed Tracing**: 
+   - Utilizes Jaeger for end-to-end distributed tracing.
+   - Provides insights into system performance and bottlenecks.
+
+7. **Comprehensive Metrics Collection**: 
+   - Integrated with Prometheus for detailed metrics gathering and monitoring.
+
+8. **Multi-tiered Data Persistence**:
+   - Amazon S3: For large message payloads and file storage.
+   - Amazon Redshift: For analytics and historical data analysis.
+   - Neo4j: For graph-based data relationships and Merkle tree structure imports.
+   - Local File Storage: Utilizes 256 sharded flat files for efficient data storage and retrieval.
+
+9. **UUID Management**: 
+   - Generate and manage unique identifiers (UUIDs) for digital threads and messages.
+   - Comprehensive search capabilities based on UUIDs.
+
+10. **Metadata Management**: 
+    - Store metadata with BLAKE3 hashes for files stored in S3.
+    - Ensures secure and verifiable data integrity.
+
+11. **Scalable and Optimized Storage**: 
+    - 256 sharded flat files for efficient data storage and retrieval.
+    - Optimized with Bloom filters for fast membership testing.
+    - Utilizes memoization techniques to improve performance of repeated operations.
+
+12. **Advanced Data Analysis and Visualization**:
+    - Integration with AWS Redshift for complex querying and historical analysis.
+    - Import of Merkle tree structures into Neo4j for graph-based visualization and analysis.
+
+13. **Search Functionality**: 
+    - Powerful search capabilities across all persisted data.
+    - Utilizes indexing for fast retrieval.
+
+14. **Configurable CORS Settings**: 
+    - Flexible Cross-Origin Resource Sharing (CORS) configuration.
+    - Ensures secure API access from various client-side applications.
+
+15. **Comprehensive API Documentation**: 
+    - Fully documented with Swagger/OpenAPI.
+    - Interactive API exploration and testing interface.
+
+16. **Dockerized Deployment**: 
+    - Containerized application for easy deployment and scaling.
+    - Includes all necessary components and dependencies.
+
+17. **Secure Communication**: 
+    - Supports HTTPS/TLS for encrypted data transmission.
+
+18. **Flexible Configuration**: 
+    - Extensive use of environment variables for easy configuration in different environments.
+
+These features combine to create a robust, scalable, and highly traceable publish-subscribe system, capable of handling complex data flows while maintaining comprehensive logging, auditing, and analysis capabilities.
 
 ## Architecture
 
