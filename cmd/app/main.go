@@ -14,6 +14,7 @@ import (
 	"github.com/aanthord/pubsub-amqp/internal/handlers"
 	"github.com/aanthord/pubsub-amqp/internal/metrics"
 	"github.com/aanthord/pubsub-amqp/internal/tracing"
+	"github.com/aanthord/pubsub-amqp/internal/business"
 	"github.com/gorilla/mux"
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -40,45 +41,46 @@ import (
 // @host localhost:8080
 // @BasePath /api/v1
 func main() {
-	// Initialize structured logging
-	logger, err := zap.NewProduction()
-	if err != nil {
-		fmt.Printf("Failed to initialize logger: %v\n", err)
-		os.Exit(1)
-	}
-	defer logger.Sync()
-	log := logger.Sugar()
-
 	// Load environment variables
 	if err := godotenv.Load(); err != nil {
-		log.Warnw("Error loading .env file", "error", err)
+		fmt.Printf("Error loading .env file: %v\n", err)
 	}
 
 	// Initialize config
 	cfg, err := config.NewConfig()
 	if err != nil {
-		log.Fatalw("Failed to initialize config", "error", err)
+		fmt.Printf("Failed to initialize config: %v\n", err)
+		os.Exit(1)
 	}
 	defer cfg.TracerCloser.Close()
 
 	// Initialize metrics
 	metrics.Init()
 
+	// Initialize message processor
+	messageProcessor := business.NewMessageProcessor(
+		cfg.AMQPService,
+		cfg.S3Service,
+		cfg.RedshiftService,
+		cfg.Logger,
+		cfg.S3OffloadLimit,
+	)
+
 	// Create router
 	router := mux.NewRouter()
 
 	// Setup middleware
-	router.Use(loggingMiddleware(log))
-	router.Use(recoveryMiddleware(log))
+	router.Use(loggingMiddleware(cfg.Logger))
+	router.Use(recoveryMiddleware(cfg.Logger))
 	router.Use(tracing.Middleware(cfg.Tracer))
 	router.Use(metricsMiddleware)
 
 	// Setup API routes
 	apiRouter := router.PathPrefix("/api/v1").Subrouter()
-	apiRouter.HandleFunc("/publish", handlers.NewPublishHandler(cfg.AMQPService, log).Handle).Methods("POST")
-	apiRouter.HandleFunc("/subscribe", handlers.NewSubscribeHandler(cfg.AMQPService, log).Handle).Methods("GET")
-	apiRouter.HandleFunc("/uuid", handlers.NewUUIDHandler(cfg.UUIDService, log).Handle).Methods("GET")
-	apiRouter.HandleFunc("/search", handlers.NewSearchHandler(cfg.SearchService, log).Handle).Methods("GET")
+	apiRouter.HandleFunc("/publish/{topic}", handlers.NewPublishHandler(messageProcessor, cfg.Logger).Handle).Methods("POST")
+	apiRouter.HandleFunc("/subscribe/{topic}", handlers.NewSubscribeHandler(cfg.AMQPService, cfg.Logger).Handle).Methods("GET")
+	apiRouter.HandleFunc("/uuid", handlers.NewUUIDHandler(cfg.UUIDService, cfg.Logger).Handle).Methods("GET")
+	apiRouter.HandleFunc("/search", handlers.NewSearchHandler(cfg.SearchService, cfg.Logger).Handle).Methods("GET")
 
 	// Health check endpoint
 	router.HandleFunc("/healthz", healthCheckHandler).Methods("GET")
@@ -118,7 +120,7 @@ func main() {
 
 	// Start server in a goroutine
 	g.Go(func() error {
-		log.Infow("Starting server", "port", config.GetEnv("PORT", "8080"))
+		cfg.Logger.Infow("Starting server", "port", config.GetEnv("PORT", "8080"))
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			return fmt.Errorf("server failed to start: %w", err)
 		}
@@ -131,9 +133,9 @@ func main() {
 		signal.Notify(sigint, os.Interrupt, syscall.SIGTERM)
 		select {
 		case <-sigint:
-			log.Info("Received interrupt signal, shutting down...")
+			cfg.Logger.Info("Received interrupt signal, shutting down...")
 		case <-ctx.Done():
-			log.Info("Shutting down due to cancelled context...")
+			cfg.Logger.Info("Shutting down due to cancelled context...")
 		}
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -143,13 +145,13 @@ func main() {
 			return fmt.Errorf("server forced to shutdown: %w", err)
 		}
 
-		log.Info("Server exited gracefully")
+		cfg.Logger.Info("Server exited gracefully")
 		return nil
 	})
 
 	// Wait for all goroutines to complete
 	if err := g.Wait(); err != nil {
-		log.Fatalw("Error during server lifecycle", "error", err)
+		cfg.Logger.Fatalw("Error during server lifecycle", "error", err)
 	}
 }
 
