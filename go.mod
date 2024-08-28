@@ -47,4 +47,5 @@ require (
 	golang.org/x/tools v0.7.0 // indirect
 	google.golang.org/protobuf v1.34.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
+	pack.ag/amqp v0.12.5 // indirect
 )

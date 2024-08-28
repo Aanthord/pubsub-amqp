@@ -16,16 +16,26 @@ type SearchService interface {
 }
 
 type searchService struct {
-    neo4jService storage.Neo4jService
-    fileStorage  *storage.FileStorage
-    logger       *zap.SugaredLogger
+    neo4jService    storage.Neo4jService
+    fileStorage     *storage.FileStorage
+    s3Service       storage.S3Service
+    redshiftService storage.RedshiftService
+    logger          *zap.SugaredLogger
 }
 
-func NewSearchService(neo4jService storage.Neo4jService, fileStorage *storage.FileStorage, logger *zap.SugaredLogger) SearchService {
+func NewSearchService(
+    neo4jService storage.Neo4jService,
+    fileStorage *storage.FileStorage,
+    s3Service storage.S3Service,
+    redshiftService storage.RedshiftService,
+    logger *zap.SugaredLogger,
+) SearchService {
     return &searchService{
-        neo4jService: neo4jService,
-        fileStorage:  fileStorage,
-        logger:       logger,
+        neo4jService:    neo4jService,
+        fileStorage:     fileStorage,
+        s3Service:       s3Service,
+        redshiftService: redshiftService,
+        logger:          logger,
     }
 }
 
@@ -33,7 +43,49 @@ func (s *searchService) SearchByTraceID(ctx context.Context, traceID string) ([]
     span, ctx := tracing.StartSpanFromContext(ctx, "SearchByTraceID", traceID)
     defer span.Finish()
 
+    var messages []*models.MessagePayload
+
     // Search in Neo4j
+    neoMessages, err := s.searchNeo4j(ctx, traceID)
+    if err != nil {
+        s.logger.Errorw("Failed to search in Neo4j", "error", err)
+        // Continue with other searches even if Neo4j search fails
+    }
+    messages = append(messages, neoMessages...)
+
+    // Search in FileStorage
+    fileMessages, err := s.fileStorage.Retrieve(ctx, traceID)
+    if err != nil {
+        s.logger.Errorw("Failed to search in file storage", "error", err)
+        // Continue with other searches even if file storage search fails
+    }
+    messages = append(messages, fileMessages...)
+
+    // Search in S3 if service is available
+    if s.s3Service != nil {
+        s3Messages, err := s.searchS3(ctx, traceID)
+        if err != nil {
+            s.logger.Errorw("Failed to search in S3", "error", err)
+            // Continue with other searches even if S3 search fails
+        }
+        messages = append(messages, s3Messages...)
+    }
+
+    // Search in Redshift if service is available
+    if s.redshiftService != nil {
+        redshiftMessages, err := s.searchRedshift(ctx, traceID)
+        if err != nil {
+            s.logger.Errorw("Failed to search in Redshift", "error", err)
+            // Continue with other searches even if Redshift search fails
+        }
+        messages = append(messages, redshiftMessages...)
+    }
+
+    span.LogKV("event", "search_completed", "results_count", len(messages))
+    return messages, nil
+}
+
+func (s *searchService) searchNeo4j(ctx context.Context, traceID string) ([]*models.MessagePayload, error) {
     cypher := `
         MATCH (m:Message {trace_id: $traceID})
         RETURN m
@@ -45,8 +97,6 @@ func (s *searchService) SearchByTraceID(ctx context.Context, traceID string) ([]
 
     result, err := s.neo4jService.ExecuteQuery(ctx, cypher, params)
     if err != nil {
-        span.SetTag("error", true)
-        span.LogKV("event", "neo4j_search_error", "error.message", err.Error())
         return nil, fmt.Errorf("failed to execute Neo4j query: %w", err)
     }
 
@@ -66,16 +116,17 @@ func (s *searchService) SearchByTraceID(ctx context.Context, traceID string) ([]
         messages = append(messages, message)
     }
 
-    // Search in FileStorage
-    fileMessages, err := s.fileStorage.Retrieve(ctx, traceID)
-    if err != nil {
-        span.SetTag("error", true)
-        span.LogKV("event", "file_storage_search_error", "error.message", err.Error())
-        return nil, fmt.Errorf("failed to search in file storage: %w", err)
-    }
-
-    messages = append(messages, fileMessages...)
-
-    span.LogKV("event", "search_completed", "results_count", len(messages))
     return messages, nil
+}
+
+func (s *searchService) searchS3(ctx context.Context, traceID string) ([]*models.MessagePayload, error) {
+    // Implement S3 search logic here
+    // This is a placeholder implementation
+    return nil, nil
+}
+
+func (s *searchService) searchRedshift(ctx context.Context, traceID string) ([]*models.MessagePayload, error) {
+    // Implement Redshift search logic here
+    // This is a placeholder implementation
+    return nil, nil
 }

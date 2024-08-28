@@ -12,7 +12,7 @@ const docTemplate = `{
         "contact": {},
         "version": "{{.Version}}"
     },
-    "host": "{{.Host}}",
+    "host": "txanunxlbapd512:8080",
     "basePath": "{{.BasePath}}",
     "paths": {}
 }`
