@@ -51,6 +51,7 @@ func NewAMQPService(amqpURL string, logger *zap.SugaredLogger) (AMQPService, err
     }, nil
 }
 
+// PublishMessage publishes a message to the specified topic
 func (s *amqpService) PublishMessage(ctx context.Context, topic string, message *models.MessagePayload) error {
     span, _ := tracing.StartSpanFromContext(ctx, "AMQPPublish", message.TraceID)
     defer span.Finish()
@@ -66,6 +67,8 @@ func (s *amqpService) PublishMessage(ctx context.Context, topic string, message 
 
     sender, err := s.session.NewSender(
         amqp.LinkTargetAddress(topic),
+        amqp.LinkTargetDurability(amqp.DurabilityUnsettledState), // Ensures the target (queue) is durable
+        amqp.LinkTargetExpiryPolicy(amqp.ExpiryNever),
     )
     if err != nil {
         span.SetTag("error", true)
@@ -94,13 +97,13 @@ func (s *amqpService) PublishMessage(ctx context.Context, topic string, message 
     return nil
 }
 
+// ConsumeMessages consumes a single message from the specified topic
 func (s *amqpService) ConsumeMessages(ctx context.Context, topic string) (<-chan *models.MessagePayload, error) {
     out := make(chan *models.MessagePayload)
 
     go func() {
         defer close(out)
 
-        // Start receiving messages
         receiver, err := s.session.NewReceiver(
             amqp.LinkSourceAddress(topic),
             amqp.LinkCredit(1), // Prefetch only 1 message at a time
@@ -111,7 +114,6 @@ func (s *amqpService) ConsumeMessages(ctx context.Context, topic string) (<-chan
         }
         defer receiver.Close(ctx)
 
-        // Receive a single message
         msg, err := receiver.Receive(ctx)
         if err != nil {
             s.logger.Errorw("Failed to receive message", "error", err)
