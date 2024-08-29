@@ -6,14 +6,14 @@ import (
 )
 
 type MessagePayload struct {
-    ID        string                 `json:"id"`
-    TraceID   string                 `json:"trace_id"`
-    Sender    string                 `json:"sender"`
-    Timestamp string                 `json:"timestamp"`
-    Version   string                 `json:"version"`
-    Content   map[string]interface{} `json:"content"`
-    S3URI     string                 `json:"s3_uri,omitempty"`
-    Retries   int                    `json:"retries"`
+    ID        string                 `json:"id" xml:"id"`
+    TraceID   string                 `json:"trace_id" xml:"trace_id"`
+    Sender    string                 `json:"sender" xml:"sender"`
+    Timestamp string                 `json:"timestamp" xml:"timestamp"`
+    Version   string                 `json:"version" xml:"version"`
+    Content   map[string]interface{} `json:"content" xml:"content"`
+    S3URI     string                 `json:"s3_uri,omitempty" xml:"s3_uri,omitempty"`
+    Retries   int                    `json:"retries" xml:"retries"`
 }
 
 func NewMessagePayload(sender string, content map[string]interface{}, traceID string) *MessagePayload {

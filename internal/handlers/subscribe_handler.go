@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aanthord/pubsub-amqp/internal/amqp"
@@ -18,24 +20,22 @@ type SubscribeHandler struct {
 }
 
 type SubscribeResponse struct {
-	Topic   string `json:"topic"`
-	Message string `json:"message"`
+	Topic   string `json:"topic" xml:"topic"`
+	Message string `json:"message" xml:"message"`
 }
 
-func NewSubscribeHandler(service amqp.AMQPService) *SubscribeHandler {
-	logger, _ := zap.NewProduction()
-	sugar := logger.Sugar()
-
-	return &SubscribeHandler{service: service, logger: sugar}
+func NewSubscribeHandler(service amqp.AMQPService, logger *zap.SugaredLogger) *SubscribeHandler {
+	return &SubscribeHandler{service: service, logger: logger}
 }
 
 // Handle godoc
 // @Summary Subscribe to a topic
 // @Description Subscribes to the specified AMQP topic and returns the next message
+// @Produce application/json, application/xml
 // @Tags messages
-// @Produce json
 // @Param topic path string true "Topic to subscribe to"
 // @Success 200 {object} SubscribeResponse
+// @Failure 204 "No message available"
 // @Failure 400 {object} ErrorResponse
 // @Failure 408 {object} ErrorResponse
 // @Failure 500 {object} ErrorResponse
@@ -68,8 +68,8 @@ func (h *SubscribeHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Start span for AMQP message consumption
-	consumeSpan, consumeCtx := tracing.StartSpanFromContext(ctx, "AMQP.ConsumeMessages", "")
-	msgChan, err := h.service.ConsumeMessages(consumeCtx, topic)
+	consumeSpan, consumeCtx := tracing.StartSpanFromContext(ctx, "AMQP.ConsumeMessage", "")
+	message, err := h.service.ConsumeMessage(consumeCtx, topic)
 	consumeSpan.Finish()
 
 	if err != nil {
@@ -81,38 +81,49 @@ func (h *SubscribeHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Wait for the message or context cancellation
-	h.logger.Infow("Waiting for message", "topic", topic)
-	select {
-	case message := <-msgChan:
-		h.logger.Infow("Message received", "topic", topic, "message_id", message.ID)
+	if message == nil {
+		h.logger.Warn("No message available in the queue", "topic", topic)
+		span.LogKV("event", "no_message_available", "topic", topic)
+		w.WriteHeader(http.StatusNoContent)
+		metrics.HTTPRequestErrors.WithLabelValues("subscribe", "204").Inc()
+		return
+	}
 
-		// Start span for processing the received message
-		processSpan, _ := tracing.StartSpanFromContext(ctx, "ProcessMessage", message.TraceID)
-		defer processSpan.Finish()
+	h.logger.Infow("Message received", "topic", topic, "message_id", message.ID)
 
-		contentJSON, err := json.Marshal(message.Content)
+	// Start span for processing the received message
+	processSpan, _ := tracing.StartSpanFromContext(ctx, "ProcessMessage", message.TraceID)
+	defer processSpan.Finish()
+
+	// Determine the response format (JSON or XML) based on the Accept header
+	acceptHeader := r.Header.Get("Accept")
+
+	var response SubscribeResponse
+	response.Topic = topic
+
+	if strings.Contains(acceptHeader, "application/xml") {
+		contentXML, err := xml.Marshal(message.Content)
 		if err != nil {
-			h.logger.Errorw("Failed to marshal message content", "error", err)
-			processSpan.SetTag("error", true)
-			processSpan.LogKV("event", "json_marshal_error", "error", err.Error())
+			h.logger.Errorw("Failed to marshal message content to XML", "error", err)
 			respondWithError(w, r, http.StatusInternalServerError, "Failed to process message content")
 			metrics.HTTPRequestErrors.WithLabelValues("subscribe", "500").Inc()
 			return
 		}
-
-		respondWithJSON(w, r, http.StatusOK, SubscribeResponse{
-			Topic:   topic,
-			Message: string(contentJSON),
-		})
-		h.logger.Infow("Message sent to client", "topic", topic)
-
-	case <-r.Context().Done():
-		h.logger.Warn("Client disconnected before receiving message", "topic", topic)
-		span.LogKV("event", "client_disconnected")
-		respondWithError(w, r, http.StatusRequestTimeout, "Request cancelled")
-		metrics.HTTPRequestErrors.WithLabelValues("subscribe", "408").Inc()
+		response.Message = string(contentXML)
+		respondWithXML(w, r, http.StatusOK, response)
+	} else {
+		contentJSON, err := json.Marshal(message.Content)
+		if err != nil {
+			h.logger.Errorw("Failed to marshal message content to JSON", "error", err)
+			respondWithError(w, r, http.StatusInternalServerError, "Failed to process message content")
+			metrics.HTTPRequestErrors.WithLabelValues("subscribe", "500").Inc()
+			return
+		}
+		response.Message = string(contentJSON)
+		respondWithJSON(w, r, http.StatusOK, response)
 	}
+
+	h.logger.Infow("Message sent to client", "topic", topic)
 
 	metrics.HTTPRequestsTotal.WithLabelValues("subscribe").Inc()
 	h.logger.Infow("Subscribe request processed", "topic", topic)

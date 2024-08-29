@@ -46,10 +46,24 @@ func InitJaeger(service string) (opentracing.Tracer, io.Closer, error) {
 
 // StartSpanFromContext starts a new span from the provided context.
 func StartSpanFromContext(ctx context.Context, operationName string, traceID string) (opentracing.Span, context.Context) {
+    // Start a new span from the context
     span, ctx := opentracing.StartSpanFromContext(ctx, operationName)
+
+    // Set the span kind as RPC client to indicate an outgoing request
     ext.SpanKindRPCClient.Set(span)
-    span.SetTag("traceID", traceID)
-    span.LogFields(log.String("event", "StartSpanFromContext"))
+
+    // If a trace ID is provided, add it as a tag to the span
+    if traceID != "" {
+        span.SetTag("traceID", traceID)
+    }
+
+    // Log the start of the span with relevant information
+    span.LogFields(
+        log.String("event", "StartSpanFromContext"),
+        log.String("operation", operationName),
+        log.String("traceID", traceID),
+    )
+
     return span, ctx
 }
 

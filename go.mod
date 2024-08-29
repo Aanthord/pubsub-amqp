@@ -22,6 +22,7 @@ require (
 )
 
 require (
+	github.com/Azure/go-amqp v1.1.0 // indirect
 	github.com/HdrHistogram/hdrhistogram-go v1.1.2 // indirect
 	github.com/KyleBanks/depth v1.2.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect

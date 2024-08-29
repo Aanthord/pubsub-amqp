@@ -1,86 +1,138 @@
 package handlers
 
 import (
-    "net/http"
-    "time"
+	"encoding/json"
+	"encoding/xml"
+	"net/http"
+	"strings"
+	"time"
 
-    "github.com/aanthord/pubsub-amqp/internal/amqp"
-    "github.com/aanthord/pubsub-amqp/internal/httputil"
-    "github.com/aanthord/pubsub-amqp/internal/metrics"
-    "github.com/aanthord/pubsub-amqp/internal/models"
-    "github.com/gorilla/mux"
-    "go.uber.org/zap"
+	"github.com/aanthord/pubsub-amqp/internal/amqp"
+	"github.com/aanthord/pubsub-amqp/internal/metrics"
+	"github.com/aanthord/pubsub-amqp/internal/models"
+	"github.com/aanthord/pubsub-amqp/internal/tracing"
+	"github.com/gorilla/mux"
+	"go.uber.org/zap"
 )
 
+// SuccessResponse represents a generic success response
+type SuccessResponse struct {
+	Message string `json:"message" xml:"message"`
+}
+
 type PublishHandler struct {
-    amqpService amqp.AMQPService
-    logger      *zap.SugaredLogger
+	service amqp.AMQPService
+	logger  *zap.SugaredLogger
 }
 
-func NewPublishHandler(amqpService amqp.AMQPService, logger *zap.SugaredLogger) *PublishHandler {
-    return &PublishHandler{
-        amqpService: amqpService,
-        logger:      logger,
-    }
-}
-
-type PublishRequest struct {
-    Sender  string                 `json:"sender" xml:"sender"`
-    Content map[string]interface{} `json:"content" xml:"content"`
-}
-
-type PublishResponse struct {
-    Status string `json:"status" xml:"status"`
+func NewPublishHandler(service amqp.AMQPService, logger *zap.SugaredLogger) *PublishHandler {
+	return &PublishHandler{service: service, logger: logger}
 }
 
 // Handle godoc
-// @Summary Publish a message
-// @Description Publishes a message to the specified topic
+// @Summary Publish a message to a topic
+// @Description Publishes a message to the specified AMQP topic
 // @Tags messages
-// @Accept json
-// @Accept xml
-// @Produce json
-// @Produce xml
+// @Accept application/json, application/xml
+// @Produce application/json, application/xml
 // @Param topic path string true "Topic to publish to"
-// @Param message body PublishRequest true "Message to publish"
-// @Success 200 {object} PublishResponse
-// @Failure 400 {object} httputil.ErrorResponse
-// @Failure 500 {object} httputil.ErrorResponse
+// @Param message body models.MessagePayload true "Message payload"
+// @Success 202 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
 // @Router /publish/{topic} [post]
 func (h *PublishHandler) Handle(w http.ResponseWriter, r *http.Request) {
-    start := time.Now()
-    defer func() {
-        metrics.HTTPRequestDuration.WithLabelValues("publish").Observe(time.Since(start).Seconds())
-    }()
+	start := time.Now()
 
-    vars := mux.Vars(r)
-    topic := vars["topic"]
+	// Start the main span for the handler using your tracing package
+	span, ctx := tracing.StartSpanFromContext(r.Context(), "PublishHandler.Handle", "")
+	defer span.Finish()
 
-    var request PublishRequest
-    if err := httputil.Decode(r, r.Body, &request); err != nil {
-        h.logger.Errorw("Failed to decode request", "error", err)
-        httputil.RespondWithError(w, r, http.StatusBadRequest, "Invalid request payload")
-        metrics.HTTPRequestErrors.WithLabelValues("publish", "400").Inc()
-        return
-    }
+	defer func() {
+		metrics.HTTPRequestDuration.WithLabelValues("publish").Observe(time.Since(start).Seconds())
+	}()
 
-    messagePayload := models.NewMessagePayload(request.Sender, request.Content, "")
+	// Extract the topic from the path
+	span.LogKV("event", "extracting_topic")
+	vars := mux.Vars(r)
+	topic := vars["topic"]
 
-    if err := h.amqpService.PublishMessage(r.Context(), topic, messagePayload); err != nil {
-        h.logger.Errorw("Failed to publish message", "error", err, "topic", topic)
-        httputil.RespondWithError(w, r, http.StatusInternalServerError, "Failed to publish message")
-        metrics.HTTPRequestErrors.WithLabelValues("publish", "500").Inc()
-        return
-    }
+	h.logger.Infow("Received publish request", "topic", topic)
 
-    response := PublishResponse{Status: "Message published"}
-    if err := httputil.RespondWithData(w, r, http.StatusOK, response); err != nil {
-        h.logger.Errorw("Failed to encode response", "error", err)
-        httputil.RespondWithError(w, r, http.StatusInternalServerError, "Failed to encode response")
-        metrics.HTTPRequestErrors.WithLabelValues("publish", "500").Inc()
-        return
-    }
+	if topic == "" {
+		h.logger.Error("Missing topic path parameter")
+		span.SetTag("error", true)
+		span.LogKV("event", "missing_topic", "error", "Missing topic path parameter")
+		respondWithError(w, r, http.StatusBadRequest, "Missing topic path parameter")
+		metrics.HTTPRequestErrors.WithLabelValues("publish", "400").Inc()
+		return
+	}
 
-    h.logger.Infow("Message published successfully", "topic", topic)
-    metrics.HTTPRequestsTotal.WithLabelValues("publish").Inc()
+	// Determine the request format (JSON or XML) based on the Content-Type header
+	contentType := r.Header.Get("Content-Type")
+
+	var message models.MessagePayload
+	var err error
+
+	if strings.Contains(contentType, "application/xml") {
+		err = xml.NewDecoder(r.Body).Decode(&message)
+	} else {
+		err = json.NewDecoder(r.Body).Decode(&message)
+	}
+
+	if err != nil {
+		h.logger.Errorw("Failed to decode message", "error", err, "content_type", contentType)
+		span.SetTag("error", true)
+		span.LogKV("event", "decode_error", "error", err.Error())
+		respondWithError(w, r, http.StatusBadRequest, "Invalid message format")
+		metrics.HTTPRequestErrors.WithLabelValues("publish", "400").Inc()
+		return
+	}
+
+	// Log the message content
+	h.logger.Debugw("Message content", "content", message)
+
+	// Publish the message
+	span.SetTag("topic", topic)
+	publishSpan, publishCtx := tracing.StartSpanFromContext(ctx, "AMQP.PublishMessage", message.TraceID)
+	defer publishSpan.Finish()
+
+	err = h.service.PublishMessage(publishCtx, topic, &message)
+	if err != nil {
+		h.logger.Errorw("Failed to publish message", "error", err, "topic", topic)
+		publishSpan.SetTag("error", true)
+		publishSpan.LogKV("event", "publish_error", "error", err.Error())
+		respondWithError(w, r, http.StatusInternalServerError, "Failed to publish message")
+		metrics.HTTPRequestErrors.WithLabelValues("publish", "500").Inc()
+		return
+	}
+
+	metrics.HTTPRequestsTotal.WithLabelValues("publish").Inc()
+	h.logger.Infow("Message published successfully", "topic", topic, "message_id", message.ID)
+
+	// Respond to the client
+	respondWithSuccess(w, r, http.StatusAccepted, "Message published")
+}
+
+// respondWithSuccess writes a success message to the response
+func respondWithSuccess(w http.ResponseWriter, r *http.Request, statusCode int, message string) {
+	response := SuccessResponse{
+		Message: message,
+	}
+
+	acceptHeader := r.Header.Get("Accept")
+
+	if strings.Contains(acceptHeader, "application/xml") {
+		w.Header().Set("Content-Type", "application/xml")
+		w.WriteHeader(statusCode)
+		if err := xml.NewEncoder(w).Encode(response); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}
 }

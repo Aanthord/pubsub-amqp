@@ -23,11 +23,11 @@ import (
     "net/http"
     "os"
     "os/signal"
+    "runtime/debug"
+    "strconv"
     "strings"
     "syscall"
     "time"
-    "runtime/debug"
-    "strconv"
 
     "github.com/aanthord/pubsub-amqp/internal/config"
     "github.com/aanthord/pubsub-amqp/internal/handlers"
@@ -76,7 +76,7 @@ func main() {
 
     apiRouter := router.PathPrefix("/api/v1").Subrouter()
     apiRouter.HandleFunc("/publish/{topic}", handlers.NewPublishHandler(cfg.AMQPService, cfg.Logger).Handle).Methods("POST")
-    apiRouter.HandleFunc("/subscribe/{topic}", handlers.NewSubscribeHandler(cfg.AMQPService).Handle).Methods("GET")
+    apiRouter.HandleFunc("/subscribe/{topic}", handlers.NewSubscribeHandler(cfg.AMQPService, cfg.Logger).Handle).Methods("GET")
     apiRouter.HandleFunc("/uuid", handlers.NewUUIDHandler(cfg.UUIDService).Handle).Methods("GET")
     apiRouter.HandleFunc("/search", handlers.NewSearchHandler(cfg.SearchService).Handle).Methods("GET")
 
