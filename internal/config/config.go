@@ -24,6 +24,7 @@ type AppConfig struct {
     Neo4jPassword      string
     RedshiftConnString string
     FileStoragePath    string
+    ShardDepth         int
 }
 
 func (c *AppConfig) GetAWSRegion() string {
@@ -54,6 +55,10 @@ func (c *AppConfig) GetFileStoragePath() string {
     return c.FileStoragePath
 }
 
+func (c *AppConfig) GetShardDepth() int {
+    return c.ShardDepth
+}
+
 type Config struct {
     AMQPService     amqp.AMQPService
     S3Service       storage.S3Service
@@ -81,6 +86,11 @@ func NewConfig() (*Config, error) {
     sugar.Info("Logger initialized")
     fmt.Println("Logger initialized")
 
+    shardDepth, err := strconv.Atoi(mustGetEnv("SHARD_DEPTH"))
+    if err != nil {
+        log.Fatalf("Invalid shard depth value: %v", err)
+    }
+
     appConfig := &AppConfig{
         AWSRegion:          mustGetEnv("AWS_REGION"),
         S3Bucket:           mustGetEnv("AWS_S3_BUCKET"),
@@ -89,6 +99,7 @@ func NewConfig() (*Config, error) {
         Neo4jPassword:      mustGetEnv("NEO4J_PASSWORD"),
         RedshiftConnString: mustGetEnv("REDSHIFT_CONN_STRING"),
         FileStoragePath:    mustGetEnv("FILE_STORAGE_PATH"),
+        ShardDepth:         shardDepth,
     }
     sugar.Infow("AppConfig initialized", "config", appConfig)
     fmt.Printf("AppConfig initialized: %+v\n", appConfig)
@@ -150,7 +161,7 @@ func NewConfig() (*Config, error) {
     fmt.Println("UUID service initialized")
 
     fileStorage, err := initializeService(func() (*storage.FileStorage, error) {
-        return storage.NewFileStorage(appConfig.GetFileStoragePath(), sugar)
+        return storage.NewFileStorage(appConfig.GetFileStoragePath(), sugar, appConfig.GetShardDepth())
     }, sugar, "File Storage")
     if err != nil {
         return nil, err

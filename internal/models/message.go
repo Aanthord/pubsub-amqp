@@ -2,35 +2,45 @@ package models
 
 import (
     "time"
+
     "github.com/google/uuid"
 )
 
 type MessagePayload struct {
-    ID        string                 `json:"id" xml:"id"`
-    TraceID   string                 `json:"trace_id" xml:"trace_id"`
-    Sender    string                 `json:"sender" xml:"sender"`
-    Timestamp string                 `json:"timestamp" xml:"timestamp"`
-    Version   string                 `json:"version" xml:"version"`
-    Content   map[string]interface{} `json:"content" xml:"content"`
-    S3URI     string                 `json:"s3_uri,omitempty" xml:"s3_uri,omitempty"`
-    Retries   int                    `json:"retries" xml:"retries"`
+    Header  HeaderData `json:"header"`
+    Content Content    `json:"content"`
 }
 
+type HeaderData struct {
+    ID        string `json:"id"`
+    TraceID   string `json:"trace_id"`
+    Sender    string `json:"sender"`
+    Timestamp string `json:"timestamp"`
+    Version   string `json:"version"`
+    Retries   int    `json:"retries"`
+    S3URI     string `json:"s3_uri,omitempty"`
+}
+
+type Content struct {
+    Data map[string]interface{} `json:"data"`
+}
+
+// NewMessagePayload creates a new MessagePayload with a generated ID and timestamp.
 func NewMessagePayload(sender string, content map[string]interface{}, traceID string) *MessagePayload {
     if traceID == "" {
         traceID = uuid.New().String()
     }
     return &MessagePayload{
-        ID:        uuid.New().String(),
-        TraceID:   traceID,
-        Sender:    sender,
-        Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-        Version:   "1.0",
-        Content:   content,
-        Retries:   0,
+        Header: HeaderData{
+            ID:        uuid.New().String(),
+            TraceID:   traceID,
+            Sender:    sender,
+            Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+            Version:   "1.0",
+            Retries:   0,
+        },
+        Content: Content{
+            Data: content,
+        },
     }
-}
-
-func (m *MessagePayload) IncrementRetry() {
-    m.Retries++
 }

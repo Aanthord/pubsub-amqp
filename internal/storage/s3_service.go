@@ -5,15 +5,16 @@ import (
     "context"
     "fmt"
     "io/ioutil"
+    "net/http"
     "time"
 
     "github.com/aanthord/pubsub-amqp/internal/metrics"
     "github.com/aanthord/pubsub-amqp/internal/tracing"
     "github.com/aanthord/pubsub-amqp/internal/types"
-    //"github.com/aws/aws-sdk-go-v2"
-    "github.com/aws/aws-sdk-go/aws"
-    "github.com/aws/aws-sdk-go/aws/session"
-    "github.com/aws/aws-sdk-go/service/s3"
+    "github.com/aws/aws-sdk-go-v2/aws"
+    "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+    "github.com/aws/aws-sdk-go-v2/config"
+    "github.com/aws/aws-sdk-go-v2/service/s3"
     "go.uber.org/zap"
 )
 
@@ -23,28 +24,35 @@ type S3Service interface {
 }
 
 type s3Service struct {
-    client *s3.S3
+    client *s3.Client
     bucket string
     logger *zap.SugaredLogger
+    signer *v4.Signer
+    creds  aws.Credentials
 }
 
-func NewS3Service(config types.ConfigProvider) (S3Service, error) {
+func NewS3Service(configProvider types.ConfigProvider) (S3Service, error) {
     logger, _ := zap.NewProduction()
     sugar := logger.Sugar()
 
-    sess, err := session.NewSession(&aws.Config{
-        Region: aws.String(config.GetAWSRegion()),
-    })
+    cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(configProvider.GetAWSRegion()))
     if err != nil {
-        return nil, fmt.Errorf("failed to create AWS session: %w", err)
+        return nil, fmt.Errorf("failed to load AWS configuration: %w", err)
     }
 
-    bucket := config.GetS3Bucket()
+    bucket := configProvider.GetS3Bucket()
+    signer := v4.NewSigner()
+    creds, err := cfg.Credentials.Retrieve(context.TODO())
+    if err != nil {
+        return nil, fmt.Errorf("failed to retrieve AWS credentials: %w", err)
+    }
 
     return &s3Service{
-        client: s3.New(sess),
+        client: s3.NewFromConfig(cfg),
         bucket: bucket,
         logger: sugar,
+        signer: signer,
+        creds:  creds,
     }, nil
 }
 
@@ -57,40 +65,26 @@ func (s *s3Service) UploadFile(ctx context.Context, key string, content []byte, 
         metrics.S3UploadDuration.Observe(time.Since(start).Seconds())
     }()
 
-    _, err := s.client.PutObjectWithContext(ctx, &s3.PutObjectInput{
-        Bucket: aws.String(s.bucket),
-        Key:    aws.String(key),
-        Body:   bytes.NewReader(content),
-    })
+    // Creating the PUT request
+    httpReq, _ := http.NewRequest("PUT", fmt.Sprintf("https://%s.s3.amazonaws.com/%s", s.bucket, key), bytes.NewReader(content))
+
+    // Sign the request using SigV4
+    err := s.signer.SignHTTP(ctx, s.creds, httpReq, "s3", s.bucket, "us-east-1", time.Now())
     if err != nil {
         span.SetTag("error", true)
-        span.LogKV("event", "s3_upload_error", "error.message", err.Error())
-        s.logger.Errorw("Failed to upload to S3", "error", err)
-        return "", fmt.Errorf("failed to upload to S3: %w", err)
+        span.LogKV("event", "s3_sign_error", "error.message", err.Error())
+        s.logger.Errorw("Failed to sign S3 request", "error", err)
+        return "", fmt.Errorf("failed to sign S3 request: %w", err)
     }
 
-    _, err = s.client.PutObjectTaggingWithContext(ctx, &s3.PutObjectTaggingInput{
-        Bucket: aws.String(s.bucket),
-        Key:    aws.String(key),
-        Tagging: &s3.Tagging{
-            TagSet: []*s3.Tag{
-                {
-                    Key:   aws.String("TraceID"),
-                    Value: aws.String(traceID),
-                },
-                {
-                    Key:   aws.String("Timestamp"),
-                    Value: aws.String(time.Now().UTC().Format(time.RFC3339)),
-                },
-            },
-        },
-    })
+    resp, err := http.DefaultClient.Do(httpReq)
     if err != nil {
         span.SetTag("error", true)
-        span.LogKV("event", "s3_metadata_error", "error.message", err.Error())
-        s.logger.Errorw("Failed to add metadata to S3 object", "error", err)
-        return "", fmt.Errorf("failed to add metadata to S3 object: %w", err)
+        span.LogKV("event", "s3_upload_request_error", "error.message", err.Error())
+        s.logger.Errorw("Failed to execute signed S3 request", "error", err)
+        return "", fmt.Errorf("failed to execute signed S3 request: %w", err)
     }
+    defer resp.Body.Close()
 
     s3URI := fmt.Sprintf("s3://%s/%s", s.bucket, key)
     span.LogKV("event", "s3_upload_success", "s3_uri", s3URI)
@@ -108,7 +102,7 @@ func (s *s3Service) GetFile(ctx context.Context, key string) ([]byte, error) {
         metrics.S3DownloadDuration.Observe(time.Since(start).Seconds())
     }()
 
-    result, err := s.client.GetObjectWithContext(ctx, &s3.GetObjectInput{
+    result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
         Bucket: aws.String(s.bucket),
         Key:    aws.String(key),
     })
@@ -128,7 +122,7 @@ func (s *s3Service) GetFile(ctx context.Context, key string) ([]byte, error) {
         return nil, fmt.Errorf("failed to read S3 object body: %w", err)
     }
 
-    taggingResult, err := s.client.GetObjectTaggingWithContext(ctx, &s3.GetObjectTaggingInput{
+    taggingResult, err := s.client.GetObjectTagging(ctx, &s3.GetObjectTaggingInput{
         Bucket: aws.String(s.bucket),
         Key:    aws.String(key),
     })

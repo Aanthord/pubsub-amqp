@@ -105,13 +105,17 @@ func (s *searchService) searchNeo4j(ctx context.Context, traceID string) ([]*mod
         record := result.Record()
         messageNode := record.GetByIndex(0).(neo4j.Node)
         message := &models.MessagePayload{
-            ID:        messageNode.Props["id"].(string),
-            TraceID:   messageNode.Props["trace_id"].(string),
-            Sender:    messageNode.Props["sender"].(string),
-            Timestamp: messageNode.Props["timestamp"].(string),
-            Version:   messageNode.Props["version"].(string),
-            S3URI:     messageNode.Props["s3_uri"].(string),
-            Retries:   int(messageNode.Props["retries"].(int64)),
+            Header: models.HeaderData{
+                ID:        messageNode.Props["id"].(string),
+                TraceID:   messageNode.Props["trace_id"].(string),
+                Sender:    messageNode.Props["sender"].(string),
+                Timestamp: messageNode.Props["timestamp"].(string),
+                Version:   messageNode.Props["version"].(string),
+                Retries:   int(messageNode.Props["retries"].(int64)),
+            },
+            Content: models.Content{
+                Data: map[string]interface{}{"s3_uri": messageNode.Props["s3_uri"].(string)},
+            },
         }
         messages = append(messages, message)
     }

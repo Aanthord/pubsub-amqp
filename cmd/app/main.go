@@ -18,7 +18,6 @@ package main
 import (
     "context"
     "encoding/json"
-    "encoding/xml"
     "fmt"
     "net/http"
     "os"
@@ -238,39 +237,12 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
     w.Write(response)
 }
 
-// respondWithXML writes an XML response to the http.ResponseWriter
-func respondWithXML(w http.ResponseWriter, code int, payload interface{}) {
-    response, _ := xml.Marshal(payload)
-    w.Header().Set("Content-Type", "application/xml")
-    w.WriteHeader(code)
-    w.Write(response)
-}
-
-// respondWithError writes an error response (JSON or XML) to the http.ResponseWriter
-func respondWithError(w http.ResponseWriter, r *http.Request, code int, message string) {
-    if preferXML(r) {
-        respondWithXML(w, code, ErrorResponse{Error: message})
-    } else {
-        respondWithJSON(w, code, ErrorResponse{Error: message})
-    }
-}
-
-// respondWithData writes a success response (JSON or XML) to the http.ResponseWriter
-func respondWithData(w http.ResponseWriter, r *http.Request, code int, payload interface{}) {
-    if preferXML(r) {
-        respondWithXML(w, code, payload)
-    } else {
-        respondWithJSON(w, code, payload)
-    }
-}
-
-// preferXML checks if the client prefers XML over JSON
-func preferXML(r *http.Request) bool {
-    accept := r.Header.Get("Accept")
-    return strings.Contains(accept, "application/xml") && !strings.Contains(accept, "application/json")
+// respondWithError writes an error response to the http.ResponseWriter
+func respondWithError(w http.ResponseWriter, code int, message string) {
+    respondWithJSON(w, code, ErrorResponse{Error: message})
 }
 
 // ErrorResponse represents an error response
 type ErrorResponse struct {
-    Error string `json:"error" xml:"error"`
+    Error string `json:"error"`
 }
