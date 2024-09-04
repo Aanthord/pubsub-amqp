@@ -12,8 +12,8 @@ import (
 )
 
 type AMQPService interface {
-    PublishMessage(ctx context.Context, topic string, message *models.MessagePayload) error
-    ConsumeMessage(ctx context.Context, topic string) (*models.MessagePayload, error)
+    PublishMessage(ctx context.Context, queueName string, message *models.MessagePayload) error
+    ConsumeMessage(ctx context.Context, queueName string) (*models.MessagePayload, error)
 }
 
 type amqpService struct {
@@ -22,10 +22,11 @@ type amqpService struct {
     logger  *zap.SugaredLogger
 }
 
+// NewAMQPService creates a new AMQPService instance
 func NewAMQPService(amqpURL string, logger *zap.SugaredLogger) (AMQPService, error) {
     logger.Infow("Connecting to AMQP", "url", amqpURL)
 
-    // Attempt to connect to the AMQP broker
+    // Connect to the AMQP broker
     conn, err := amqp.Dial(context.TODO(), amqpURL, nil)
     if err != nil {
         logger.Errorw("Failed to connect to AMQP", "url", amqpURL, "error", err)
@@ -33,11 +34,11 @@ func NewAMQPService(amqpURL string, logger *zap.SugaredLogger) (AMQPService, err
     }
     logger.Info("Connected to AMQP successfully")
 
-    // Start a session
+    // Create a new session
     session, err := conn.NewSession(context.TODO(), nil)
     if err != nil {
         logger.Errorw("Failed to create AMQP session", "error", err)
-        conn.Close() // Close the connection since we failed to create a session
+        conn.Close()
         return nil, fmt.Errorf("failed to create session: %w", err)
     }
     logger.Info("Opened AMQP session successfully")
@@ -50,9 +51,8 @@ func NewAMQPService(amqpURL string, logger *zap.SugaredLogger) (AMQPService, err
     }, nil
 }
 
-// PublishMessage publishes a message to the specified topic
-func (s *amqpService) PublishMessage(ctx context.Context, topic string, message *models.MessagePayload) error {
-    // Start a new span for message publishing, passing the trace ID from the message
+// PublishMessage publishes a message to the specified anycast queue
+func (s *amqpService) PublishMessage(ctx context.Context, queueName string, message *models.MessagePayload) error {
     span, ctx := tracing.StartSpanFromContext(ctx, "AMQPPublish", message.Header.TraceID)
     defer span.Finish()
 
@@ -65,116 +65,118 @@ func (s *amqpService) PublishMessage(ctx context.Context, topic string, message 
         return fmt.Errorf("failed to marshal message: %w", err)
     }
 
-    // Log the size of the marshaled message
-    messageSize := len(jsonMessage)
-    span.LogKV("event", "message_size", "message_size_bytes", messageSize, "trace_id", message.Header.TraceID)
-    s.logger.Infow("Marshaled message size", "message_size_bytes", messageSize, "trace_id", message.Header.TraceID)
-
-    // Create a new sender
-    sender, err := s.session.NewSender(context.TODO(), topic, nil)
+    // Ensure the queue exists
+    err = s.ensureQueueExists(ctx, queueName)
     if err != nil {
-        span.SetTag("error", true)
-        span.LogKV("event", "sender_error", "error.message", err.Error(), "trace_id", message.Header.TraceID)
-        s.logger.Errorw("Failed to create sender", "error", err, "topic", topic, "trace_id", message.Header.TraceID)
+        s.logger.Errorw("Failed to ensure queue exists", "queueName", queueName, "error", err)
+        return fmt.Errorf("failed to ensure queue exists: %w", err)
+    }
+
+    // Create a sender
+    sender, err := s.session.NewSender(context.TODO(), queueName, &amqp.SenderOptions{
+        Target: &amqp.Target{
+            Address:      queueName,
+            Durable:      amqp.Durable,
+            Capabilities: []amqp.Symbol{"anycast"},
+        },
+    })
+    if err != nil {
+        s.logger.Errorw("Failed to create sender", "error", err, "queue", queueName)
         return fmt.Errorf("failed to create sender: %w", err)
     }
-    defer func() {
-        err := sender.Close(context.TODO())
-        if err != nil {
-            s.logger.Errorw("Failed to close sender", "error", err, "trace_id", message.Header.TraceID)
-        }
-    }()
+    defer sender.Close(ctx)
 
-    // Prepare the message for sending, including the trace ID in the headers
+    // Prepare the message
     msg := amqp.NewMessage(jsonMessage)
     msg.ApplicationProperties = map[string]interface{}{
         "traceID": message.Header.TraceID,
     }
 
-    // Log the entire message before sending
-    span.LogKV("event", "sending_message", "message_id", message.Header.ID, "message_body", string(jsonMessage), "trace_id", message.Header.TraceID)
-    s.logger.Infow("Publishing message", "topic", topic, "message_id", message.Header.ID, "trace_id", message.Header.TraceID)
-
     // Send the message
     err = sender.Send(ctx, msg, nil)
     if err != nil {
-        span.SetTag("error", true)
-        span.LogKV("event", "publish_error", "error.message", err.Error(), "trace_id", message.Header.TraceID)
-        s.logger.Errorw("Failed to publish message", "error", err, "topic", topic, "message_id", message.Header.ID, "trace_id", message.Header.TraceID)
+        s.logger.Errorw("Failed to publish message", "error", err, "queue", queueName)
         return fmt.Errorf("failed to publish message: %w", err)
     }
 
-    // Log successful message publication
-    span.LogKV("event", "message_published", "message_id", message.Header.ID, "trace_id", message.Header.TraceID)
-    s.logger.Infow("Message published successfully", "topic", topic, "message_id", message.Header.ID, "trace_id", message.Header.TraceID)
-
+    s.logger.Infow("Message published successfully", "queue", queueName, "message_id", message.Header.ID)
     return nil
 }
 
-// ConsumeMessage consumes a single message from the specified topic
-func (s *amqpService) ConsumeMessage(ctx context.Context, topic string) (*models.MessagePayload, error) {
-    // Create a new receiver
-    receiver, err := s.session.NewReceiver(ctx, topic, nil)
+// ConsumeMessage consumes a single message from the specified anycast queue
+func (s *amqpService) ConsumeMessage(ctx context.Context, queueName string) (*models.MessagePayload, error) {
+    // Create a receiver for the anycast queue
+    receiver, err := s.session.NewReceiver(context.TODO(), queueName, &amqp.ReceiverOptions{
+        Source: &amqp.Source{
+            Address:      queueName,
+            Capabilities: []amqp.Symbol{"anycast"},
+        },
+    })
     if err != nil {
-        s.logger.Errorw("Failed to create receiver", "error", err, "topic", topic)
+        s.logger.Errorw("Failed to create receiver", "error", err, "queue", queueName)
         return nil, fmt.Errorf("failed to create receiver: %w", err)
     }
-    defer func() {
-        if closeErr := receiver.Close(ctx); closeErr != nil {
-            s.logger.Errorw("Failed to close receiver", "error", closeErr)
-        }
-    }()
+    defer receiver.Close(ctx)
 
-    // Attempt to receive a single message
+    // Receive a message
     msg, err := receiver.Receive(ctx, nil)
     if err != nil {
         if ctx.Err() == context.Canceled {
             s.logger.Info("Context canceled during message receive")
             return nil, ctx.Err()
         }
-        s.logger.Errorw("Failed to receive message", "error", err)
+        s.logger.Errorw("Failed to receive message", "error", err, "queue", queueName)
         return nil, fmt.Errorf("failed to receive message: %w", err)
     }
 
-    // Extract trace_id from message headers if available
+    // Extract traceID from the message
     traceID, ok := msg.ApplicationProperties["traceID"].(string)
-    if !ok || traceID == "" {
+    if !ok {
         traceID = "no-trace-id"
-        s.logger.Warn("Message missing trace_id, using default")
+        s.logger.Warn("Received message missing traceID")
     }
 
-    // Start a new span for message processing using the extracted trace_id
+    // Start a span and process the message
     span, spanCtx := tracing.StartSpanFromContext(ctx, "AMQPConsume", traceID)
     defer span.Finish()
 
-    // Log the raw message data size
-    rawData := msg.GetData()
-    dataSize := len(rawData)
-    span.LogKV("event", "message_received", "message_size_bytes", dataSize, "trace_id", traceID)
-    s.logger.Infow("Message received", "data_size", dataSize, "trace_id", traceID)
-
-    // Unmarshal the message assuming JSON content
+    // Unmarshal the message
     var payload models.MessagePayload
-    err = json.Unmarshal(rawData, &payload)
-    if err != nil {
+    if err := json.Unmarshal(msg.GetData(), &payload); err != nil {
+        s.logger.Errorw("Failed to unmarshal message", "error", err, "traceID", traceID)
         span.SetTag("error", true)
-        span.LogKV("event", "unmarshal_error", "error.message", err.Error(), "trace_id", traceID)
-        s.logger.Errorw("Failed to unmarshal message", "error", err, "trace_id", traceID)
+        span.LogKV("event", "unmarshal_error", "error.message", err.Error())
         return nil, fmt.Errorf("failed to unmarshal message: %w", err)
     }
 
-    // Accept the message (acknowledge)
-    err = receiver.AcceptMessage(spanCtx, msg)
-    if err != nil {
+    // Log the payload into the span
+    span.LogKV("event", "message_received", "message_id", payload.Header.ID, "payload", string(msg.GetData()))
+
+    // Acknowledge the message
+    if err := receiver.AcceptMessage(spanCtx, msg); err != nil {
+        s.logger.Errorw("Failed to acknowledge message", "error", err, "traceID", traceID)
         span.SetTag("error", true)
-        span.LogKV("event", "accept_message_error", "error.message", err.Error(), "trace_id", traceID)
-        s.logger.Errorw("Failed to accept message", "error", err, "trace_id", traceID)
+        span.LogKV("event", "ack_error", "error.message", err.Error())
         return nil, fmt.Errorf("failed to accept message: %w", err)
     }
 
-    // Log the processed message and acknowledge successful processing
-    span.LogKV("event", "message_processed", "message_id", payload.Header.ID, "trace_id", payload.Header.TraceID, "message_body", string(rawData))
-    s.logger.Infow("Message processed and acknowledged", "message_id", payload.Header.ID, "trace_id", payload.Header.TraceID)
-
+    s.logger.Infow("Message consumed and acknowledged", "queue", queueName, "message_id", payload.Header.ID)
     return &payload, nil
+}
+
+// ensureQueueExists ensures the queue is created if it doesn't already exist
+func (s *amqpService) ensureQueueExists(ctx context.Context, queueName string) error {
+    sender, err := s.session.NewSender(ctx, queueName, &amqp.SenderOptions{
+        Target: &amqp.Target{
+            Address:      queueName,
+            Durable:      amqp.Durable,
+            Capabilities: []amqp.Symbol{"anycast"},
+        },
+    })
+    if err != nil {
+        s.logger.Errorw("Failed to ensure queue exists", "error", err, "queue", queueName)
+        return fmt.Errorf("failed to create queue: %w", err)
+    }
+    defer sender.Close(ctx)
+    return nil
 }
