@@ -31,3 +31,15 @@ func respondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
     w.WriteHeader(code)
     w.Write(response)
 }
+
+func respondWithSuccess(w http.ResponseWriter, r *http.Request, statusCode int, message string) {
+    response := SuccessResponse{
+        Message: message,
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(statusCode)
+    if err := json.NewEncoder(w).Encode(response); err != nil {
+        http.Error(w, err.Error(), http.StatusInternalServerError)
+    }
+}

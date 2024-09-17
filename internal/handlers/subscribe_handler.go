@@ -1,7 +1,7 @@
 package handlers
 
 import (
-
+    "context"
     "net/http"
     "time"
 
@@ -29,7 +29,7 @@ func NewSubscribeHandler(service amqp.AMQPService, logger *zap.SugaredLogger) *S
 }
 
 // @Summary Subscribe to a topic
-// @Description Subscribes to the specified AMQP topic and returns the next message
+// @Description Subscribes to the specified AMQP topic and returns the next message or a 204 if no message is available within the timeout period
 // @Tags messages
 // @Accept json
 // @Produce json
@@ -64,8 +64,19 @@ func (h *SubscribeHandler) Handle(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    message, err := h.service.ConsumeMessage(ctx, topic)
+    // Set up a context with a timeout for long polling (e.g., 30 seconds)
+    timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+    defer cancel()
+
+    message, err := h.service.ConsumeMessage(timeoutCtx, topic)
     if err != nil {
+        if timeoutCtx.Err() == context.DeadlineExceeded {
+            h.logger.Warn("No message available in the queue", "topic", topic)
+            span.LogKV("event", "no_message_available", "topic", topic)
+            w.WriteHeader(http.StatusNoContent) // 204 No Content
+            metrics.HTTPRequestErrors.WithLabelValues("subscribe", "204").Inc()
+            return
+        }
         h.logger.Errorw("Failed to subscribe to topic", "error", err, "topic", topic)
         span.SetTag("error", true)
         span.LogKV("event", "amqp_consume_error", "error", err.Error())
@@ -77,7 +88,7 @@ func (h *SubscribeHandler) Handle(w http.ResponseWriter, r *http.Request) {
     if message == nil {
         h.logger.Warn("No message available in the queue", "topic", topic)
         span.LogKV("event", "no_message_available", "topic", topic)
-        w.WriteHeader(http.StatusNoContent)
+        w.WriteHeader(http.StatusNoContent) // 204 No Content
         metrics.HTTPRequestErrors.WithLabelValues("subscribe", "204").Inc()
         return
     }

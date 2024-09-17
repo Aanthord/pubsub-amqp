@@ -14,6 +14,18 @@ import (
     "go.uber.org/zap"
 )
 
+// ValidationError is a custom struct to capture field-specific validation errors
+type ValidationError struct {
+    Field   string `json:"field"`
+    Message string `json:"message"`
+}
+
+// LintingErrorResponse is a detailed error response for validation and linting issues
+type LintingErrorResponse struct {
+    Error       string            `json:"error"`
+    Validations []ValidationError `json:"validations,omitempty"`
+}
+
 // SuccessResponse represents a generic success response
 type SuccessResponse struct {
     Message string `json:"message"`
@@ -37,7 +49,7 @@ func NewPublishHandler(service amqp.AMQPService, logger *zap.SugaredLogger) *Pub
 // @Param topic path string true "Topic to publish to"
 // @Param message body models.MessagePayload true "Message payload"
 // @Success 202 {object} SuccessResponse "Message published successfully"
-// @Failure 400 {object} ErrorResponse "Bad request when the message format is incorrect"
+// @Failure 400 {object} LintingErrorResponse "Bad request when the message format is incorrect"
 // @Failure 500 {object} ErrorResponse "Internal server error if the publishing fails"
 // @Router /publish/{topic} [post]
 func (h *PublishHandler) Handle(w http.ResponseWriter, r *http.Request) {
@@ -68,13 +80,15 @@ func (h *PublishHandler) Handle(w http.ResponseWriter, r *http.Request) {
     var message models.MessagePayload
     contentType := r.Header.Get("Content-Type")
 
-    // Read and log the raw request body
+    // Read the raw request body
     body, err := ioutil.ReadAll(r.Body)
     if err != nil {
         h.logger.Errorw("Failed to read request body", "error", err)
         respondWithError(w, r, http.StatusInternalServerError, "Failed to read request body")
         return
     }
+
+    // Log the raw request body
     h.logger.Infow("Received request body", "body", string(body))
 
     // Reset the body for further reading
@@ -86,7 +100,21 @@ func (h *PublishHandler) Handle(w http.ResponseWriter, r *http.Request) {
         h.logger.Errorw("Failed to decode message", "error", err, "content_type", contentType)
         span.SetTag("error", true)
         span.LogKV("event", "decoding_failed", "error", err)
-        respondWithError(w, r, http.StatusBadRequest, "Invalid message format")
+
+        // Return a detailed error response for JSON unmarshalling errors
+        respondWithError(w, r, http.StatusBadRequest, "Invalid message format: "+err.Error())
+        metrics.HTTPRequestErrors.WithLabelValues("publish", "400").Inc()
+        return
+    }
+
+    // Validate the message payload
+    validationErrors := validateMessagePayload(message)
+    if len(validationErrors) > 0 {
+        h.logger.Errorw("Message validation failed", "validation_errors", validationErrors)
+        span.SetTag("error", true)
+        span.LogKV("event", "validation_failed", "errors", validationErrors)
+
+        respondWithLintingError(w, r, http.StatusBadRequest, validationErrors)
         metrics.HTTPRequestErrors.WithLabelValues("publish", "400").Inc()
         return
     }
@@ -110,15 +138,48 @@ func (h *PublishHandler) Handle(w http.ResponseWriter, r *http.Request) {
     respondWithSuccess(w, r, http.StatusAccepted, "Message published")
 }
 
-// respondWithSuccess writes a success message to the response.
-func respondWithSuccess(w http.ResponseWriter, r *http.Request, statusCode int, message string) {
-    response := SuccessResponse{
-        Message: message,
+// validateMessagePayload performs basic validation on the MessagePayload.
+func validateMessagePayload(payload models.MessagePayload) []ValidationError {
+    var validationErrors []ValidationError
+
+    if payload.Header.ID == "" {
+        validationErrors = append(validationErrors, ValidationError{
+            Field:   "Header.ID",
+            Message: "Message ID is required",
+        })
     }
 
-    w.Header().Set("Content-Type", "application/json")
-    w.WriteHeader(statusCode)
-    if err := json.NewEncoder(w).Encode(response); err != nil {
-        http.Error(w, err.Error(), http.StatusInternalServerError)
+    if payload.Header.Sender == "" {
+        validationErrors = append(validationErrors, ValidationError{
+            Field:   "Header.Sender",
+            Message: "Sender is required",
+        })
     }
+
+    if payload.Header.Timestamp == "" {
+        validationErrors = append(validationErrors, ValidationError{
+            Field:   "Header.Timestamp",
+            Message: "Timestamp is required",
+        })
+    }
+
+    if payload.Header.TraceID == "" {
+        validationErrors = append(validationErrors, ValidationError{
+            Field:   "Header.TraceID",
+            Message: "TraceID is required",
+        })
+    }
+
+    // Add more checks as needed for other fields...
+
+    return validationErrors
+}
+
+// respondWithLintingError returns a structured validation error response.
+func respondWithLintingError(w http.ResponseWriter, r *http.Request, code int, validationErrors []ValidationError) {
+    response := LintingErrorResponse{
+        Error:       "Validation errors in the message payload",
+        Validations: validationErrors,
+    }
+    respondWithJSON(w, code, response)
 }
