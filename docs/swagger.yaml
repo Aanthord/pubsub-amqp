@@ -1,4 +1,102 @@
+swagger: '2.0'
 info:
-  contact: {}
-paths: {}
-swagger: "2.0"
+  version: "1.0.0"
+  title: "Pub/Sub API"
+paths:
+  /publish/{topic}:
+    post:
+      summary: "Publish a message to a topic"
+      description: "Publishes a message to the specified AMQP topic"
+      parameters:
+        - name: topic
+          in: path
+          required: true
+          type: string
+          description: "Topic to publish to"
+        - name: message
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/MessagePayload'
+      consumes:
+        - application/json
+        - application/xml
+      produces:
+        - application/json
+        - application/xml
+      responses:
+        '202':
+          description: "Message published successfully"
+          schema:
+            $ref: '#/definitions/SuccessResponse'
+          examples:
+            application/json:
+              message: "Message published"
+            application/xml:
+              <SuccessResponse>
+                <message>Message published</message>
+              </SuccessResponse>
+        '400':
+          description: "Invalid message format"
+          schema:
+            $ref: '#/definitions/LintingErrorResponse'
+          examples:
+            application/json:
+              error: "Invalid message format"
+              validations:
+                - field: "Header.ID"
+                  message: "Message ID is required"
+            application/xml:
+              <LintingErrorResponse>
+                <error>Invalid message format</error>
+                <validations>
+                  <field>Header.ID</field>
+                  <message>Message ID is required</message>
+                </validations>
+              </LintingErrorResponse>
+        '500':
+          description: "Internal server error"
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+          examples:
+            application/json:
+              error: "Failed to publish message"
+            application/xml:
+              <ErrorResponse>
+                <error>Failed to publish message</error>
+              </ErrorResponse>
+definitions:
+  MessagePayload:
+    type: "object"
+    properties:
+      Header:
+        $ref: '#/definitions/MessageHeader'
+      Content:
+        $ref: '#/definitions/MessageContent'
+  SuccessResponse:
+    type: "object"
+    properties:
+      message:
+        type: "string"
+  LintingErrorResponse:
+    type: "object"
+    properties:
+      error:
+        type: "string"
+      validations:
+        type: "array"
+        items:
+          $ref: '#/definitions/ValidationError'
+  ValidationError:
+    type: "object"
+    properties:
+      field:
+        type: "string"
+      message:
+        type: "string"
+  ErrorResponse:
+    type: "object"
+    properties:
+      error:
+        type: "string"
+

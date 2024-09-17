@@ -2,20 +2,22 @@ package handlers
 
 import (
     "context"
+    "encoding/json"
     "net/http"
     "time"
 
     "github.com/aanthord/pubsub-amqp/internal/amqp"
     "github.com/aanthord/pubsub-amqp/internal/metrics"
     "github.com/aanthord/pubsub-amqp/internal/tracing"
+    "github.com/clbanning/mxj/v2" // mxj library for handling XML and JSON
     "github.com/gorilla/mux"
     "go.uber.org/zap"
 )
 
 // SubscribeResponse represents a subscription response
 type SubscribeResponse struct {
-    Topic   string                 `json:"topic"`
-    Message map[string]interface{} `json:"message"`
+    Topic   string                 `json:"topic" xml:"topic"`
+    Message map[string]interface{} `json:"message" xml:"message"`
 }
 
 // SubscribeHandler handles subscribing to a topic.
@@ -106,6 +108,15 @@ func (h *SubscribeHandler) Handle(w http.ResponseWriter, r *http.Request) {
     h.logger.Infow("Message sent to client", "topic", topic)
     metrics.HTTPRequestsTotal.WithLabelValues("subscribe").Inc()
 
-    respondWithJSON(w, http.StatusOK, response)
+    // Determine whether to respond with XML or JSON based on the Accept header
+    acceptHeader := r.Header.Get("Accept")
+    if acceptHeader == "application/xml" {
+        respondWithXML(w, http.StatusOK, response)
+    } else {
+        respondWithJSON(w, http.StatusOK, response)
+    }
+
     h.logger.Infow("Subscribe request processed", "topic", topic)
 }
+
+
